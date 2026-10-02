@@ -499,6 +499,14 @@ void Application::InitializeProtocol() {
 
     // Force WebSocket protocol for the stackchan-mcp gateway (bypass OTA config)
     protocol_ = std::make_unique<WebsocketProtocol>();
+    {
+        // StackChan FW-A (design §2.2): persistent boot counter for fw_epoch.
+        Settings settings("stackchan", true);
+        int32_t boot_count = settings.GetInt("boot_count", 0) + 1;
+        settings.SetInt("boot_count", boot_count);
+        protocol_->SetBootCount(static_cast<uint32_t>(boot_count));
+        ESP_LOGI(TAG, "StackChan boot_count=%d", static_cast<int>(boot_count));
+    }
 
     protocol_->OnConnected([this]() {
         DismissAlert();
@@ -1295,11 +1303,7 @@ void Application::SendStackChanEvent(
         cJSON_AddNumberToObject(root, "duration_ms", static_cast<double>(duration_ms));
         cJSON_AddNumberToObject(root, "ts", static_cast<double>(esp_timer_get_time() / 1000ULL));
 
-        char* str = cJSON_PrintUnformatted(root);
-        if (str != nullptr) {
-            protocol_->SendText(std::string(str));
-            cJSON_free(str);
-        }
+        protocol_->SendJson(root);  // StackChan FW-A: stamped with fw_epoch/seq
         cJSON_Delete(root);
     });
 }
@@ -1308,10 +1312,20 @@ void Application::SendJsonString(const std::string& json_str) {
     // Thread-safe generic WS text frame send. Used by board-initiated
     // notifications such as avatar_set_loaded (Phase 4.5 avatar). Mirrors
     // SendMcpMessage's main-task Schedule pattern for protocol safety.
+    // StackChan FW-A (design §2.2): re-parse so the frame is stamped with
+    // fw_epoch/seq; non-JSON or non-object input is dropped (no seq consumed).
     Schedule([this, json_str]() {
-        if (protocol_) {
-            protocol_->SendText(json_str);
+        if (!protocol_) {
+            return;
         }
+        cJSON* root = cJSON_Parse(json_str.c_str());
+        if (root == nullptr || !cJSON_IsObject(root)) {
+            ESP_LOGW(TAG, "SendJsonString: not a JSON object, dropped");
+            cJSON_Delete(root);
+            return;
+        }
+        protocol_->SendJson(root);
+        cJSON_Delete(root);
     });
 }
 
