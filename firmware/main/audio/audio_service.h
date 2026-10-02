@@ -139,10 +139,19 @@ public:
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+    // StackChan FW-A (design §2.1.2): server audio only. Dropped (and counted) while
+    // server audio is not accepted, i.e. from ResetDecoder() until AcceptServerAudio(true).
+    // Local sounds (PlaySound) keep using PushPacketToDecodeQueue and are never gated.
+    bool PushServerPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet);
+    void AcceptServerAudio(bool accept);
+    uint32_t server_audio_rejected() const { return server_audio_rejected_; }
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
-    void ResetDecoder();
+    // StackChan FW-A (design §2.1.1): clears the decode/playback queues, bumps the playback
+    // generation (so audio decoded from an already-popped packet is discarded) and stops
+    // accepting server audio, all under one lock. Returns the number of queued items cleared.
+    uint32_t ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
 
 private:
@@ -182,6 +191,9 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    std::atomic<uint32_t> playback_generation_{0};  // StackChan FW-A: bumped by ResetDecoder()
+    bool accept_server_audio_ = false;              // guarded by audio_queue_mutex_
+    uint32_t server_audio_rejected_ = 0;            // diagnostic; not part of abort dropped_ms
     std::mutex raw_capture_mutex_;
     std::atomic<uint32_t> raw_capture_generation_{0};
     std::unique_ptr<std::vector<int16_t>> raw_capture_buffer_;
