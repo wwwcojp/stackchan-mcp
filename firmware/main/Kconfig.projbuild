@@ -93,6 +93,30 @@ config FORCE_DEFAULT_WEBSOCKET_URL
         Default disabled to preserve NVS-priority semantics for end users
         who configure the URL/token via runtime tooling.
 
+config STACKCHAN_SKIP_OTA_CHECK
+    bool "StackChan FW-A: skip the boot-time OTA/activation query"
+    default n
+    help
+        When enabled, the firmware does not contact the OTA server at boot
+        (no version query, no activation flow, no retry waits). The local
+        steps are kept: the current version is read from the app descriptor
+        and the running image is marked valid. Local assets are applied as
+        before. Use with a LAN gateway that does not run an OTA endpoint.
+        Enabled for the stackchan build via boards/stackchan/config.json
+        (sdkconfig_append); a "default y if BOARD_TYPE_STACKCHAN" here would
+        not take effect because release.py appends the board type after
+        sdkconfig has been generated.
+
+config STACKCHAN_WIFI_PS_NONE
+    bool "StackChan FW-A: keep Wi-Fi power save off"
+    default n
+    help
+        When enabled, the StackChan board always passes PERFORMANCE
+        (WIFI_PS_NONE) to the Wi-Fi layer, even when the application asks
+        for LOW_POWER on idle. Round-trip latency drops from ~900 ms to a
+        few ms at the cost of higher power draw (the kit is mains powered).
+        Enabled for the stackchan build via boards/stackchan/config.json.
+
 config STACKCHAN_MDNS_DISCOVERY
     bool "Discover stackchan-mcp gateway with mDNS"
     default y if BOARD_TYPE_STACKCHAN

@@ -13,6 +13,8 @@ public:
     ~Ota();
 
     esp_err_t CheckVersion();
+    // StackChan FW-A: set current_version_ from the app descriptor without any network I/O.
+    void LoadCurrentVersion();
     esp_err_t Activate();
     bool HasActivationChallenge() { return has_activation_challenge_; }
     bool HasNewVersion() { return has_new_version_; }

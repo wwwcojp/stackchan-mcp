@@ -417,6 +417,14 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
+#if CONFIG_STACKCHAN_SKIP_OTA_CHECK
+    // StackChan FW-A (design §2.4): no OTA/activation query at boot. Keep the
+    // local steps the query used to perform as side effects.
+    ota_->LoadCurrentVersion();
+    ota_->MarkCurrentVersionValid();
+    ESP_LOGI(TAG, "OTA check skipped (CONFIG_STACKCHAN_SKIP_OTA_CHECK)");
+    return;
+#endif
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10; // Initial retry delay in seconds
