@@ -53,3 +53,26 @@ target_link_libraries(listening_profile_test
 include(GoogleTest)
 gtest_discover_tests(mdns_candidate_extract_test)
 gtest_discover_tests(listening_profile_test)
+
+# StackChan FW-A: cJSON for host tests. Prefer the copy shipped with ESP-IDF
+# (espressif/idf image sets IDF_PATH); fall back to FetchContent otherwise.
+enable_language(C)  # cJSON is C; the project above enables CXX only
+if(DEFINED ENV{IDF_PATH} AND EXISTS "$ENV{IDF_PATH}/components/json/cJSON/cJSON.c")
+    add_library(cjson STATIC "$ENV{IDF_PATH}/components/json/cJSON/cJSON.c")
+    target_include_directories(cjson PUBLIC "$ENV{IDF_PATH}/components/json/cJSON")
+else()
+    FetchContent_Declare(
+        cjson
+        GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
+        GIT_TAG v1.7.18
+    )
+    FetchContent_MakeAvailable(cjson)
+endif()
+
+add_executable(message_stamp_test
+    test_message_stamp.cc
+    ../main/protocols/message_stamp.cc
+)
+target_include_directories(message_stamp_test PRIVATE ../main/protocols)
+target_link_libraries(message_stamp_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME message_stamp_test COMMAND message_stamp_test)
