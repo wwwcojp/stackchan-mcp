@@ -81,3 +81,11 @@ add_executable(message_stamp_test
 target_include_directories(message_stamp_test PRIVATE ../main/protocols)
 target_link_libraries(message_stamp_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME message_stamp_test COMMAND message_stamp_test)
+
+add_executable(abort_policy_test
+    test_abort_policy.cc
+    ../main/abort_policy.cc
+)
+target_include_directories(abort_policy_test PRIVATE ../main)
+target_link_libraries(abort_policy_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME abort_policy_test COMMAND abort_policy_test)

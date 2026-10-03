@@ -476,7 +476,8 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
                     if (strcmp(type->valuestring, "hello") == 0) {
                         ParseServerHello(root, notify_disconnect, arm_audio_channel);
                     } else if (strcmp(type->valuestring, "tts") == 0 ||
-                               strcmp(type->valuestring, "listen") == 0) {
+                               strcmp(type->valuestring, "listen") == 0 ||
+                               strcmp(type->valuestring, "abort") == 0) {  // StackChan FW-A
                         // Drop tts/listen messages whose session_id does not
                         // match the current WebSocket session set by
                         // ParseServerHello, while allowing the gateway's

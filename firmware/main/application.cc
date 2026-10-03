@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "abort_policy.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -510,6 +511,12 @@ void Application::InitializeProtocol() {
 
     protocol_->OnConnected([this]() {
         DismissAlert();
+        // StackChan FW-A (design §2.1.2): the rejected-server-audio counter is per connection.
+        uint32_t rejected = audio_service_.TakeServerAudioRejected();
+        if (rejected > 0) {
+            ESP_LOGI(TAG, "server audio rejected on the previous connection: %u packets",
+                     static_cast<unsigned>(rejected));
+        }
     });
 
     protocol_->OnNetworkError([this](const std::string& message) {
@@ -519,7 +526,8 @@ void Application::InitializeProtocol() {
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+            // StackChan FW-A: gated so audio racing with an abort is dropped (design §2.1.2)
+            audio_service_.PushServerPacketToDecodeQueue(std::move(packet));
         }
     });
     
@@ -548,6 +556,12 @@ void Application::InitializeProtocol() {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this, &board]() {
                     aborted_ = false;
+                    if (GetDeviceState() == kDeviceStateSpeaking) {
+                        // StackChan FW-A: no state-change event will fire, so re-open
+                        // server audio here (it is re-opened after the Speaking
+                        // transition's ResetDecoder() otherwise). Idempotent.
+                        audio_service_.AcceptServerAudio(true);
+                    }
                     SetDeviceState(kDeviceStateSpeaking);
                     // Phase 4 audio (Issue #76): drive avatar mouth animation
                     // for the lifetime of this TTS utterance. Default no-op
@@ -649,6 +663,33 @@ void Application::InitializeProtocol() {
                 Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                     display->SetEmotion(emotion_str.c_str());
                 });
+            }
+        } else if (strcmp(type->valuestring, "abort") == 0) {
+            // StackChan FW-A (design §2.1): server-requested abort. Empties the
+            // decode/playback queues immediately (unlike tts stop, which lets the
+            // queue drain) and replies {"type":"abort","state":"done"}.
+            // A reply-shaped abort ({"state":...}) is never treated as a request.
+            std::string reason;
+            if (stackchan::IsAbortRequest(root, protocol_->session_id(), &reason)) {
+                Schedule([this, &board, reason]() {
+                    uint32_t cleared = audio_service_.ResetDecoder();
+                    aborted_ = true;
+                    if (stackchan::AbortReturnsToIdle(GetDeviceState())) {
+                        SetDeviceState(kDeviceStateIdle);
+                    }
+                    board.OnTtsStop();
+                    if (protocol_) {
+                        cJSON* done = stackchan::BuildAbortDone(
+                            protocol_->session_id(), reason, stackchan::DroppedMs(cleared));
+                        protocol_->SendJson(done);
+                        cJSON_Delete(done);
+                    }
+                    ESP_LOGI(TAG, "abort(%s): cleared %u queued packets, rejected %u server packets since the last report",
+                             reason.c_str(), static_cast<unsigned>(cleared),
+                             static_cast<unsigned>(audio_service_.TakeServerAudioRejected()));
+                });
+            } else {
+                ESP_LOGD(TAG, "Ignoring abort message that is not a request");
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
@@ -1108,6 +1149,9 @@ void Application::HandleStateChangedEvent() {
             }
             listening_profile_ = ListeningProfileAfterStop(listening_profile_);
             audio_service_.ResetDecoder();
+            // StackChan FW-A (design §2.1.2): ResetDecoder() closed server audio;
+            // re-open it now that the device is Speaking.
+            audio_service_.AcceptServerAudio(true);
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableRawCapture(false);
