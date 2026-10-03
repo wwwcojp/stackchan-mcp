@@ -19,6 +19,7 @@
 #endif
 
 #include <cstring>
+#include <string>
 #include <vector>
 #include <sstream>
 #include <algorithm>
@@ -216,8 +217,9 @@ esp_err_t Ota::CheckVersion() {
             auto result = stackchan::ApplyServerTime(time);
             if (result == stackchan::ApplyResult::kOk) {
                 has_server_time_ = true;
-                ESP_LOGI(TAG, "server_time set (ota): clock_utc_ms=%lld offset_min=%d",
-                         static_cast<long long>(stackchan::ReadClockUtcMs()),
+                // 64-bit via std::to_string: the nano printf has no %lld (see websocket_protocol.cc).
+                ESP_LOGI(TAG, "server_time set (ota): clock_utc_ms=%s offset_min=%d",
+                         std::to_string(stackchan::ReadClockUtcMs()).c_str(),
                          static_cast<int>(time.offset_min));
             } else {
                 ESP_LOGW(TAG, "server_time (ota): %s", stackchan::ApplyResultText(result));

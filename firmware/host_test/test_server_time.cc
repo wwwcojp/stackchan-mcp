@@ -61,17 +61,29 @@ TEST(ParseServerTime, RejectsMissingOrInvalidFields) {
     EXPECT_FALSE(Parse(R"({"timestamp": 0, "timezone_offset": -780})", &t));   // beyond -12:00
 }
 
-TEST(ParseServerTime, RejectsTimestampsThatDoNotFitInt64AndLeavesOutUntouched) {
+TEST(ParseServerTime, RejectsTimestampsFromTheYear10000AndLeavesOutUntouched) {
     ServerTime t{};
     t.utc_ms = 7;
     t.offset_min = 7;
     EXPECT_FALSE(Parse(R"({"timestamp": 1e100})", &t));
     EXPECT_FALSE(Parse(R"({"timestamp": 9223372036854775808})", &t));  // 2^63
+    EXPECT_FALSE(Parse(R"({"timestamp": 253402300800000})", &t));      // 10000-01-01T00:00:00Z
     EXPECT_FALSE(Parse(R"({"timestamp": 0, "timezone_offset": 900})", &t));
     EXPECT_EQ(t.utc_ms, 7);
     EXPECT_EQ(t.offset_min, 7);
-    ASSERT_TRUE(Parse(R"({"timestamp": 9200000000000000000})", &t));  // below 2^63
-    EXPECT_EQ(t.utc_ms, 9200000000000000000LL);
+    ASSERT_TRUE(Parse(R"({"timestamp": 253402300799999})", &t));  // 9999-12-31T23:59:59.999Z
+    EXPECT_EQ(t.utc_ms, 253402300799999LL);
+}
+
+TEST(ParseServerTime, OffsetBoundariesAreInclusive) {
+    ServerTime t{};
+    ASSERT_TRUE(Parse(R"({"timestamp": 0, "timezone_offset": 840})", &t));   // +14:00
+    EXPECT_EQ(t.offset_min, 840);
+    ASSERT_TRUE(Parse(R"({"timestamp": 0, "timezone_offset": -720})", &t));  // -12:00
+    EXPECT_EQ(t.offset_min, -720);
+    EXPECT_FALSE(Parse(R"({"timestamp": 0, "timezone_offset": 841})", &t));
+    EXPECT_FALSE(Parse(R"({"timestamp": 0, "timezone_offset": -721})", &t));
+    EXPECT_EQ(t.offset_min, -720);  // the rejected values left it alone
 }
 
 TEST(ParseServerTime, TruncatesAFractionOfAMillisecond) {
@@ -159,4 +171,7 @@ TEST(PosixTzForOffset, LocaltimeShowsTheOffsetWhileTheClockStaysUtc) {
     EXPECT_EQ(local.tm_mday, 2);
     EXPECT_EQ(local.tm_hour, 20);
     EXPECT_EQ(local.tm_min, 30);
+
+    unsetenv("TZ");  // do not leak the TZ into the tests that run after this one
+    tzset();
 }

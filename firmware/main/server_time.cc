@@ -12,7 +12,9 @@ namespace stackchan {
 namespace {
 constexpr int32_t kMinOffsetMin = -12 * 60;
 constexpr int32_t kMaxOffsetMin = 14 * 60;
-constexpr double kTwoTo63 = 9223372036854775808.0;  // first double that does not fit int64
+// First instant of the year 10000 (UTC) in ms. settimeofday() on the device returns success but
+// breaks the clock for timestamps much beyond this (around 1.8e16 ms), so reject from here on.
+constexpr double kYear10000Ms = 253402300800000.0;
 
 int SystemSetTz(const char* tz) {
     if (setenv("TZ", tz, 1) != 0) {
@@ -33,7 +35,7 @@ bool ParseServerTime(const cJSON* server_time, ServerTime* out) {
     }
     const cJSON* timestamp = cJSON_GetObjectItemCaseSensitive(server_time, "timestamp");
     if (!cJSON_IsNumber(timestamp) || !std::isfinite(timestamp->valuedouble) ||
-        timestamp->valuedouble < 0 || timestamp->valuedouble >= kTwoTo63) {
+        timestamp->valuedouble < 0 || timestamp->valuedouble >= kYear10000Ms) {
         return false;
     }
     int32_t offset_min = 0;

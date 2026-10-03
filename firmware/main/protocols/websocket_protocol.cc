@@ -7,6 +7,7 @@
 #include "settings.h"
 
 #include <cstring>
+#include <string>
 #include <cJSON.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
@@ -777,8 +778,10 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
             auto result = stackchan::ApplyServerTime(time);
             if (result == stackchan::ApplyResult::kOk) {
                 // Read the clock back: the acceptance compares it with the UTC that was sent.
-                ESP_LOGI(TAG, "server_time set (hello): clock_utc_ms=%lld offset_min=%d",
-                         static_cast<long long>(stackchan::ReadClockUtcMs()),
+                // The newlib nano printf cannot format a 64-bit %lld (it prints "ld"), so the
+                // 64-bit value goes through std::to_string.
+                ESP_LOGI(TAG, "server_time set (hello): clock_utc_ms=%s offset_min=%d",
+                         std::to_string(stackchan::ReadClockUtcMs()).c_str(),
                          static_cast<int>(time.offset_min));
             } else {
                 ESP_LOGW(TAG, "server_time (hello): %s", stackchan::ApplyResultText(result));

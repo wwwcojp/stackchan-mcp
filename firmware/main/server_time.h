@@ -21,7 +21,8 @@ struct ServerTime {
 };
 
 // Pure. False (and *out untouched) unless server_time is an object with a numeric "timestamp" in
-// [0, 2^63) ms (a fractional part is truncated) and, if present, an integral "timezone_offset"
+// [0, 253402300800000) ms, i.e. before the year 10000 (a fractional part is truncated; the device's
+// settimeofday() reports no failure and silently breaks the clock far beyond this) and, if present, an integral "timezone_offset"
 // within [-720, +840] minutes.
 bool ParseServerTime(const cJSON* server_time, ServerTime* out);
 
