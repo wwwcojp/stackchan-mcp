@@ -74,13 +74,17 @@ std::unique_ptr<Http> Ota::SetupHttp() {
 /* 
  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
  */
-esp_err_t Ota::CheckVersion() {
-    auto& board = Board::GetInstance();
+void Ota::LoadCurrentVersion() {
     auto app_desc = esp_app_get_description();
-
-    // Check if there is a new firmware version available
     current_version_ = app_desc->version;
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
+}
+
+esp_err_t Ota::CheckVersion() {
+    auto& board = Board::GetInstance();
+
+    // Check if there is a new firmware version available
+    LoadCurrentVersion();
 
     std::string url = GetCheckVersionUrl();
     if (url.length() < 10) {

@@ -7132,7 +7132,13 @@ public:
         if (level != PowerSaveLevel::LOW_POWER) {
             power_save_timer_->WakeUp();
         }
+#if CONFIG_STACKCHAN_WIFI_PS_NONE
+        // StackChan FW-A (design §2.3): the WakeUp decision above still uses the
+        // requested level; only the Wi-Fi layer is pinned to PERFORMANCE (PS_NONE).
+        WifiBoard::SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+#else
         WifiBoard::SetPowerSaveLevel(level);
+#endif
     }
 
     // Phase 4 audio (Issue #76): drive avatar mouth animation alongside TTS

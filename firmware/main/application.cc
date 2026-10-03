@@ -378,6 +378,22 @@ void Application::CheckAssetsVersion() {
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
 
+#if CONFIG_STACKCHAN_SKIP_OTA_CHECK
+    if (CONFIG_STACKCHAN_TEST_SEED_ASSETS_URL[0] != '\0') {
+        // Test-only build (Kconfig STACKCHAN_TEST_SEED_ASSETS_URL): leave a URL in NVS.
+        settings.SetString("download_url", CONFIG_STACKCHAN_TEST_SEED_ASSETS_URL);
+        download_url = settings.GetString("download_url");
+        ESP_LOGW(TAG, "test: seeded assets download_url");
+    }
+    // StackChan FW-A (design §2.4): no network at boot. A URL left in NVS (e.g. by an
+    // earlier OTA reply) is kept but not downloaded; local assets are still applied.
+    if (!download_url.empty()) {
+        ESP_LOGI(TAG, "assets download skipped (CONFIG_STACKCHAN_SKIP_OTA_CHECK): %s",
+                 download_url.c_str());
+        download_url.clear();
+    }
+#endif
+
     if (!download_url.empty()) {
         settings.EraseKey("download_url");
 
@@ -417,6 +433,14 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
+#if CONFIG_STACKCHAN_SKIP_OTA_CHECK
+    // StackChan FW-A (design §2.4): no OTA/activation query at boot. Keep the
+    // local steps the query used to perform as side effects.
+    ota_->LoadCurrentVersion();
+    ota_->MarkCurrentVersionValid();
+    ESP_LOGI(TAG, "OTA check skipped (CONFIG_STACKCHAN_SKIP_OTA_CHECK)");
+    return;
+#endif
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10; // Initial retry delay in seconds
