@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "server_time.h"
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
@@ -206,23 +207,21 @@ esp_err_t Ota::CheckVersion() {
     has_server_time_ = false;
     cJSON *server_time = cJSON_GetObjectItem(root, "server_time");
     if (cJSON_IsObject(server_time)) {
-        cJSON *timestamp = cJSON_GetObjectItem(server_time, "timestamp");
-        cJSON *timezone_offset = cJSON_GetObjectItem(server_time, "timezone_offset");
-        
-        if (cJSON_IsNumber(timestamp)) {
-            // 设置系统时间
-            struct timeval tv;
-            double ts = timestamp->valuedouble;
-            
-            // 如果有时区偏移，计算本地时间
-            if (cJSON_IsNumber(timezone_offset)) {
-                ts += (timezone_offset->valueint * 60 * 1000); // 转换分钟为毫秒
+        // StackChan FW-A (design §2.6): the clock is set to UTC and the offset becomes TZ
+        // (upstream shifted the clock itself by the offset). Shared with the gateway hello.
+        stackchan::ServerTime time;
+        if (!stackchan::ParseServerTime(server_time, &time)) {
+            ESP_LOGW(TAG, "server_time is invalid; ignored");
+        } else {
+            auto result = stackchan::ApplyServerTime(time);
+            if (result == stackchan::ApplyResult::kOk) {
+                has_server_time_ = true;
+                ESP_LOGI(TAG, "server_time set (ota): clock_utc_ms=%lld offset_min=%d",
+                         static_cast<long long>(stackchan::ReadClockUtcMs()),
+                         static_cast<int>(time.offset_min));
+            } else {
+                ESP_LOGW(TAG, "server_time (ota): %s", stackchan::ApplyResultText(result));
             }
-            
-            tv.tv_sec = (time_t)(ts / 1000);  // 转换毫秒为秒
-            tv.tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;  // 剩余的毫秒转换为微秒
-            settimeofday(&tv, NULL);
-            has_server_time_ = true;
         }
     } else {
         ESP_LOGW(TAG, "No server_time section found!");

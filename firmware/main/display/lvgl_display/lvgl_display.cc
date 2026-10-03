@@ -144,7 +144,12 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                 strftime(time_str, sizeof(time_str), "%H:%M", tm);
                 SetStatus(time_str);
             } else {
-                ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
+                // StackChan FW-A (design §2.6): warn once per boot; keep retrying the display.
+                static bool warned_time_not_set = false;
+                if (!warned_time_not_set) {
+                    ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
+                    warned_time_not_set = true;
+                }
             }
         }
     }

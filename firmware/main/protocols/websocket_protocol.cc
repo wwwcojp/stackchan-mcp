@@ -1,4 +1,5 @@
 #include "websocket_protocol.h"
+#include "server_time.h"
 #include "mdns_gateway_discovery.h"
 #include "board.h"
 #include "system_info.h"
@@ -764,6 +765,26 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     }
     session_id_ = session_id->valuestring;
     ESP_LOGI(TAG, "Session ID: %s", session_id_.c_str());
+
+    // StackChan FW-A (design §2.6): optional wall-clock time from the gateway. Never fails the
+    // hello: a missing or invalid server_time leaves the clock and TZ untouched.
+    auto server_time = cJSON_GetObjectItem(root, "server_time");
+    if (server_time != nullptr) {
+        stackchan::ServerTime time;
+        if (!stackchan::ParseServerTime(server_time, &time)) {
+            ESP_LOGW(TAG, "server_time in hello is invalid; ignored");
+        } else {
+            auto result = stackchan::ApplyServerTime(time);
+            if (result == stackchan::ApplyResult::kOk) {
+                // Read the clock back: the acceptance compares it with the UTC that was sent.
+                ESP_LOGI(TAG, "server_time set (hello): clock_utc_ms=%lld offset_min=%d",
+                         static_cast<long long>(stackchan::ReadClockUtcMs()),
+                         static_cast<int>(time.offset_min));
+            } else {
+                ESP_LOGW(TAG, "server_time (hello): %s", stackchan::ApplyResultText(result));
+            }
+        }
+    }
 
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");
     if (cJSON_IsObject(audio_params)) {

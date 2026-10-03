@@ -89,3 +89,11 @@ add_executable(abort_policy_test
 target_include_directories(abort_policy_test PRIVATE ../main)
 target_link_libraries(abort_policy_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME abort_policy_test COMMAND abort_policy_test)
+
+add_executable(server_time_test
+    test_server_time.cc
+    ../main/server_time.cc
+)
+target_include_directories(server_time_test PRIVATE ../main)
+target_link_libraries(server_time_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME server_time_test COMMAND server_time_test)
