@@ -708,6 +708,7 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddBoolToObject(features, "aec", true);
 #endif
     cJSON_AddBoolToObject(features, "mcp", true);
+    cJSON_AddNumberToObject(features, "stackchan_ext", 1);  // StackChan FW-A (design §1)
     cJSON_AddItemToObject(root, "features", features);
     cJSON_AddStringToObject(root, "transport", "websocket");
     cJSON* audio_params = cJSON_CreateObject();
@@ -716,6 +717,10 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddNumberToObject(audio_params, "channels", 1);
     cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS);
     cJSON_AddItemToObject(root, "audio_params", audio_params);
+    // StackChan FW-A (design §2.2): new connection -> conn_index+1, seq restarts; hello is seq 1.
+    // hello is sent directly (not via SendJson), so stamp it here.
+    stamp_.BeginConnection();
+    stamp_.Stamp(root);
     auto json_str = cJSON_PrintUnformatted(root);
     std::string message(json_str);
     cJSON_free(json_str);

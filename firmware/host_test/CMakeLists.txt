@@ -73,3 +73,11 @@ endif()
 add_executable(cjson_link_test test_cjson_link.cc)
 target_link_libraries(cjson_link_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME cjson_link_test COMMAND cjson_link_test)
+
+add_executable(message_stamp_test
+    test_message_stamp.cc
+    ../main/protocols/message_stamp.cc
+)
+target_include_directories(message_stamp_test PRIVATE ../main/protocols)
+target_link_libraries(message_stamp_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME message_stamp_test COMMAND message_stamp_test)

@@ -7,6 +7,8 @@
 #include <chrono>
 #include <vector>
 
+#include "message_stamp.h"
+
 struct AudioStreamPacket {
     int sample_rate = 0;
     int frame_duration = 0;
@@ -91,7 +93,15 @@ public:
     // for the audio / MCP paths; making it public is a no-op for them.
     virtual bool SendText(const std::string& text) = 0;
 
+    // StackChan FW-A (design §2.2): every device->server JSON object goes through
+    // SendJson so it carries fw_epoch and seq. root stays owned by the caller.
+    // Returns false (and sends nothing, consumes no seq) unless root is an object.
+    bool SendJson(cJSON* root);
+    void SetBootCount(uint32_t boot_count) { stamp_.SetBootCount(boot_count); }
+
 protected:
+    stackchan::MessageStamp stamp_{0};
+
     std::function<void(const cJSON* root)> on_incoming_json_;
     std::function<void(std::unique_ptr<AudioStreamPacket> packet)> on_incoming_audio_;
     std::function<void()> on_audio_channel_opened_;
