@@ -130,3 +130,9 @@ add_executable(ui_model_traces_test test_ui_model_traces.cc)
 target_compile_definitions(ui_model_traces_test PRIVATE MODEL_TRACES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/model_traces")
 target_link_libraries(ui_model_traces_test PRIVATE GTest::gtest_main ui_controller_core cjson)
 add_test(NAME ui_model_traces_test COMMAND ui_model_traces_test)
+
+# StackChan FW-A2 §3: the link manager's transition function
+add_executable(link_manager_core_test test_link_manager_core.cc ../main/link/link_manager_core.cc)
+target_include_directories(link_manager_core_test PRIVATE ../main/link)
+target_link_libraries(link_manager_core_test PRIVATE GTest::gtest_main)
+add_test(NAME link_manager_core_test COMMAND link_manager_core_test)
