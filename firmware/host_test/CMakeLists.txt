@@ -111,3 +111,9 @@ target_compile_definitions(playback_gate_vectors_test
     PRIVATE CONTRACT_VECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/contract_vectors")
 target_link_libraries(playback_gate_vectors_test PRIVATE GTest::gtest_main playback_gate_core cjson)
 add_test(NAME playback_gate_vectors_test COMMAND playback_gate_vectors_test)
+
+# StackChan FW-A2 §2.2, §6.1, §7.1-2: origin of queued audio and the queue-model enumeration
+add_executable(audio_origin_test test_audio_origin.cc ../main/audio/audio_origin.cc)
+target_include_directories(audio_origin_test PRIVATE ../main/audio)
+target_link_libraries(audio_origin_test PRIVATE GTest::gtest_main playback_gate_core)
+add_test(NAME audio_origin_test COMMAND audio_origin_test)
