@@ -136,3 +136,9 @@ add_executable(link_manager_core_test test_link_manager_core.cc ../main/link/lin
 target_include_directories(link_manager_core_test PRIVATE ../main/link)
 target_link_libraries(link_manager_core_test PRIVATE GTest::gtest_main)
 add_test(NAME link_manager_core_test COMMAND link_manager_core_test)
+
+# StackChan FW-A2 §4.1: SendAll under one deadline
+add_executable(send_deadline_test test_send_deadline.cc ../main/net/send_deadline.cc)
+target_include_directories(send_deadline_test PRIVATE ../main/net)
+target_link_libraries(send_deadline_test PRIVATE GTest::gtest_main)
+add_test(NAME send_deadline_test COMMAND send_deadline_test)
