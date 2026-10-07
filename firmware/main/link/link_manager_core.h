@@ -53,6 +53,7 @@ struct State {
     int64_t audio_hello_reply_us = 0;  // S6 starts here (receive time, §3.2)
     int64_t deadline_us = 0;  // the current stage's deadline (hello, S6, flush, exits)
     uint32_t pending_exits = 0;  // Task bits still running while ending
+    uint32_t exited = 0;         // Task bits of this attempt that exited before the end
     bool flush_ctrl = false;  // ending after a violation: wait for the control queue first
     bool flushing = false;
     EndReason reason = EndReason::kNone;

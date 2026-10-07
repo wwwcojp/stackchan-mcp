@@ -37,6 +37,7 @@ State ToWaiting(State s, int64_t now) {
     s.backoff_ms = std::min(s.backoff_ms * 2, kBackoffMaxMs);
     s.deadline_us = 0;
     s.pending_exits = 0;
+    s.exited = 0;
     s.flushing = false;
     s.flush_ctrl = false;
     s.ctrl_link_up = false;
@@ -66,14 +67,18 @@ State EndPair(State s, EndReason reason, bool flush, int64_t now, Outs* out) {
     s.stage = Stage::kEnding;
     s.reason = reason;
     s.ended_pairs++;
-    s.pending_exits = alive;
+    // tasks that already exited (their notice came before the end) are not waited for again
+    s.pending_exits = alive & ~s.exited;
     s.flush_ctrl = close.keep_ctrl;
+    if (s.pending_exits == 0) {  // nothing runs: nothing to flush or stop
+        out->push_back(Out(OutKind::kDestroy, s.e));
+        return ToWaiting(s, now);
+    }
     if (s.flush_ctrl) {
         s.flushing = true;
         s.deadline_us = now + kFlushUs;
         return s;
     }
-    if (alive == 0) return ToWaiting(s, now);
     return RequestStop(s, now, out);
 }
 
@@ -125,6 +130,17 @@ StepResult Step(const State& s0, const Input& in) {
         }
         case InKind::kConnectResult: {
             if (in.attempt != s.attempt) return Stale(s);
+            // A result of this attempt's worker after the end (S6, Shutdown, ...). The worker
+            // reports before it exits, so its exit is still pending; a link it made already runs
+            // its tasks: stop them too and wait for them (final reviews 135/136).
+            if (s.stage == Stage::kEnding && (s.pending_exits & kConnWorker) != 0) {
+                if (in.ok) {
+                    s.pending_exits |= in.which == kAudioRx ? (kAudioRx | kAudioTx) : (kCtrlRx | kCtrlTx);
+                    if (in.which == kCtrlRx) s.ctrl_link_up = true;
+                    if (!s.flushing) out->push_back(Out(OutKind::kRequestStop, s.e, s.attempt));
+                }
+                return r;
+            }
             if (in.which == kAudioRx && s.stage == Stage::kAudioConnect) {
                 if (!in.ok) return {ToWaiting(s, in.now_us), {}};
                 s.e = in.e;
@@ -192,9 +208,15 @@ StepResult Step(const State& s0, const Input& in) {
             return r;
         }
         case InKind::kTaskExited: {
-            if (in.e != s.e || s.stage != Stage::kEnding) return Stale(s);
+            if (in.e != s.e) return Stale(s);
+            if (Building(s.stage)) {  // exited before its EndRequest arrived: remember it
+                s.exited |= in.which;
+                return r;
+            }
+            if (s.stage != Stage::kEnding) return Stale(s);
             s.pending_exits &= ~in.which;
-            if (s.pending_exits == 0 && !s.flushing) {
+            // all gone: nothing is left to flush either (the control send task exited)
+            if (s.pending_exits == 0) {
                 out->push_back(Out(OutKind::kDestroy, s.e));
                 s = ToWaiting(s, in.now_us);
             }

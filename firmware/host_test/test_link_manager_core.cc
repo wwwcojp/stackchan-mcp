@@ -255,3 +255,61 @@ TEST(LinkManagerCore, ShutdownStopsReconnecting) {
     EXPECT_EQ(s.stage, Stage::kStopped);
     EXPECT_TRUE(Step(s, Tick(100 * S)).out.empty());
 }
+
+// Final reviews 135/136: the end waits for exactly the tasks that exist, whatever the order of
+// the notices from the shell's tasks.
+TEST(LinkManagerCore, AllExitsDuringTheFlushDestroyAtOnce) {
+    // Codex 136 Important 2, Claude 135 A: nothing is left to flush once every task exited
+    State s = Step(Bound(), End(E1, EndReason::kViolation, 2 * S, true)).state;
+    for (uint32_t t : {kAudioRx, kAudioTx, kCtrlRx}) {
+        StepResult r = Step(s, Exited(E1, t, 2 * S));
+        EXPECT_TRUE(r.out.empty());
+        s = r.state;
+    }
+    StepResult r = Step(s, Exited(E1, kCtrlTx, 2 * S));
+    EXPECT_EQ(r.out, std::vector<Output>({O(OutKind::kDestroy, E1)}));
+    EXPECT_EQ(r.state.stage, Stage::kWaiting);
+    EXPECT_TRUE(Step(r.state, WithE(InKind::kCtrlFlushed, E1, 2 * S)).out.empty());  // late: stale
+    for (const auto& o : Step(r.state, Tick(5 * S)).out) EXPECT_NE(o.kind, OutKind::kRestart);
+}
+
+TEST(LinkManagerCore, AnExitBeforeTheEndRequestIsNotWaitedForAgain) {
+    // Claude 135 B: the receive task exits, then its EndRequest arrives
+    StepResult early = Step(Bound(), Exited(E1, kAudioRx, 2 * S));
+    EXPECT_TRUE(early.out.empty());
+    EXPECT_EQ(early.state.stale_inputs, Bound().stale_inputs);
+    State s = Step(early.state, End(E1, EndReason::kAudioClosed, 2 * S)).state;
+    EXPECT_EQ(s.pending_exits, uint32_t{kAudioTx | kCtrlRx | kCtrlTx});
+    for (uint32_t t : {kAudioTx, kCtrlRx}) s = Step(s, Exited(E1, t, 2 * S)).state;
+    EXPECT_EQ(Step(s, Exited(E1, kCtrlTx, 2 * S)).out, std::vector<Output>({O(OutKind::kDestroy, E1)}));
+}
+
+TEST(LinkManagerCore, AConnectionMadeAfterTheEndIsStoppedAndWaitedFor) {
+    // Codex 136 Important 1, Claude 135 C: S6 while connecting the control link, then the worker
+    // reports success (its receive task already runs) before it exits
+    State s = Feed(State{}, {Tick(0), Connected(1, kAudioRx, true), HelloReply(1, E1, true, 2 * S)});
+    s = Step(s, Tick(7 * S)).state;
+    ASSERT_EQ(s.stage, Stage::kEnding);
+    StepResult r = Step(s, Connected(1, kCtrlRx, true, E1, 7 * S));
+    EXPECT_EQ(r.out, std::vector<Output>({O(OutKind::kRequestStop, E1, 1)}));
+    EXPECT_EQ(r.state.pending_exits, uint32_t{kAudioRx | kAudioTx | kConnWorker | kCtrlRx | kCtrlTx});
+    EXPECT_EQ(r.state.stale_inputs, s.stale_inputs);
+    s = r.state;
+    for (uint32_t t : {kAudioRx, kAudioTx, kConnWorker, kCtrlRx}) {
+        StepResult x = Step(s, Exited(E1, t, 7 * S));
+        EXPECT_TRUE(x.out.empty());
+        s = x.state;
+    }
+    EXPECT_EQ(Step(s, Exited(E1, kCtrlTx, 7 * S)).out, std::vector<Output>({O(OutKind::kDestroy, E1)}));
+    // the audio link made after a shutdown during its connect, likewise
+    State a = Step(Step(State{}, Tick(0)).state, WithE(InKind::kShutdown, 0, 0)).state;
+    ASSERT_EQ(a.pending_exits, uint32_t{kConnWorker});
+    StepResult ra = Step(a, Connected(1, kAudioRx, true, E1, 0));
+    EXPECT_EQ(ra.state.pending_exits, uint32_t{kConnWorker | kAudioRx | kAudioTx});
+    ASSERT_EQ(ra.out.size(), 1u);
+    EXPECT_EQ(ra.out[0].kind, OutKind::kRequestStop);
+    // a failure adds nothing; the worker's own exit ends the wait
+    StepResult rf = Step(a, Connected(1, kAudioRx, false, E1, 0));
+    EXPECT_EQ(rf.state.pending_exits, uint32_t{kConnWorker});
+    EXPECT_EQ(Step(rf.state, Exited(0, kConnWorker, 0)).out, std::vector<Output>({O(OutKind::kDestroy, 0)}));
+}
