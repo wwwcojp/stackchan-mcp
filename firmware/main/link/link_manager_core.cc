@@ -22,22 +22,14 @@ bool Building(Stage st) {
            st == Stage::kBound;
 }
 
-// The tasks alive for the current pair at this stage
-uint32_t AliveTasks(const State& s) {
-    uint32_t t = 0;
-    if (s.stage != Stage::kAudioConnect) t |= kAudioRx | kAudioTx;
-    if (s.ctrl_link_up) t |= kCtrlRx | kCtrlTx;
-    if (s.stage == Stage::kAudioConnect || s.stage == Stage::kCtrlConnect) t |= kConnWorker;
-    return t;
-}
-
 State ToWaiting(State s, int64_t now) {
     s.stage = s.shutdown ? Stage::kStopped : Stage::kWaiting;
     s.retry_at_us = now + static_cast<int64_t>(s.backoff_ms) * 1000;
     s.backoff_ms = std::min(s.backoff_ms * 2, kBackoffMaxMs);
     s.deadline_us = 0;
-    s.pending_exits = 0;
+    s.started = 0;
     s.exited = 0;
+    s.pending_exits = 0;
     s.flushing = false;
     s.flush_ctrl = false;
     s.ctrl_link_up = false;
@@ -55,7 +47,6 @@ State RequestStop(State s, int64_t now, Outs* out) {
 // End the pair once (K1). §3.4 step 1, then flush (violation) or stop.
 State EndPair(State s, EndReason reason, bool flush, int64_t now, Outs* out) {
     const bool was_bound = s.stage == Stage::kBound;
-    const uint32_t alive = AliveTasks(s);
     Output stop = Out(OutKind::kStopForDeath, s.e);
     stop.reason = reason;
     out->push_back(stop);
@@ -67,8 +58,8 @@ State EndPair(State s, EndReason reason, bool flush, int64_t now, Outs* out) {
     s.stage = Stage::kEnding;
     s.reason = reason;
     s.ended_pairs++;
-    // tasks that already exited (their notice came before the end) are not waited for again
-    s.pending_exits = alive & ~s.exited;
+    // only the tasks that run: an exit noticed before the end is not waited for again
+    s.pending_exits = s.started & ~s.exited;
     s.flush_ctrl = close.keep_ctrl;
     if (s.pending_exits == 0) {  // nothing runs: nothing to flush or stop
         out->push_back(Out(OutKind::kDestroy, s.e));
@@ -102,6 +93,8 @@ StepResult Step(const State& s0, const Input& in) {
                         s.attempt++;
                         s.stage = Stage::kAudioConnect;
                         s.e = 0;
+                        s.started = kAudioWorker;
+                        s.exited = 0;
                         s.reason = EndReason::kNone;
                         out->push_back(Out(OutKind::kConnectAudio, 0, s.attempt));
                     }
@@ -131,18 +124,21 @@ StepResult Step(const State& s0, const Input& in) {
         case InKind::kConnectResult: {
             if (in.attempt != s.attempt) return Stale(s);
             // A result of this attempt's worker after the end (S6, Shutdown, ...). The worker
-            // reports before it exits, so its exit is still pending; a link it made already runs
-            // its tasks: stop them too and wait for them (final reviews 135/136).
-            if (s.stage == Stage::kEnding && (s.pending_exits & kConnWorker) != 0) {
+            // reports before it exits, so the attempt is still ending; a link it made already runs
+            // its tasks: count them, stop them too, and wait for them (final reviews 135-137).
+            if (s.stage == Stage::kEnding) {
                 if (in.ok) {
-                    s.pending_exits |= in.which == kAudioRx ? (kAudioRx | kAudioTx) : (kCtrlRx | kCtrlTx);
+                    s.started |= in.which == kAudioRx ? (kAudioRx | kAudioTx) : (kCtrlRx | kCtrlTx);
+                    if (in.which == kAudioRx && s.e == 0) s.e = in.e;  // ended before its epoch
                     if (in.which == kCtrlRx) s.ctrl_link_up = true;
-                    if (!s.flushing) out->push_back(Out(OutKind::kRequestStop, s.e, s.attempt));
+                    s.pending_exits = s.started & ~s.exited;
+                    if (s.pending_exits != 0 && !s.flushing) out->push_back(Out(OutKind::kRequestStop, s.e));
                 }
                 return r;
             }
             if (in.which == kAudioRx && s.stage == Stage::kAudioConnect) {
                 if (!in.ok) return {ToWaiting(s, in.now_us), {}};
+                s.started |= kAudioRx | kAudioTx;
                 s.e = in.e;
                 s.stage = Stage::kAudioHello;
                 s.deadline_us = in.now_us + kHelloTimeoutUs;
@@ -154,6 +150,7 @@ StepResult Step(const State& s0, const Input& in) {
                     s = EndPair(s, EndReason::kConnectFailed, false, in.now_us, out);
                     return r;
                 }
+                s.started |= kCtrlRx | kCtrlTx;
                 s.ctrl_link_up = true;
                 s.stage = Stage::kCtrlHello;
                 out->push_back(Out(OutKind::kSendCtrlHello, s.e));
@@ -171,6 +168,7 @@ StepResult Step(const State& s0, const Input& in) {
             s.audio_hello_reply_us = in.at_us;
             s.deadline_us = in.at_us + kS6Us;
             s.stage = Stage::kCtrlConnect;
+            s.started |= kCtrlWorker;
             out->push_back(Out(OutKind::kConnectCtrl, s.e, s.attempt));
             return r;
         }
@@ -208,13 +206,12 @@ StepResult Step(const State& s0, const Input& in) {
             return r;
         }
         case InKind::kTaskExited: {
-            if (in.e != s.e) return Stale(s);
-            if (Building(s.stage)) {  // exited before its EndRequest arrived: remember it
-                s.exited |= in.which;
-                return r;
-            }
-            if (s.stage != Stage::kEnding) return Stale(s);
-            s.pending_exits &= ~in.which;
+            // by the attempt: an attempt may end before it knows its epoch. Remembered in any
+            // stage and order (before the EndRequest, before the late connect result).
+            if (in.attempt != s.attempt || !(Building(s.stage) || s.stage == Stage::kEnding)) return Stale(s);
+            s.exited |= in.which;
+            if (s.stage != Stage::kEnding) return r;  // the EndRequest follows
+            s.pending_exits = s.started & ~s.exited;
             // all gone: nothing is left to flush either (the control send task exited)
             if (s.pending_exits == 0) {
                 out->push_back(Out(OutKind::kDestroy, s.e));

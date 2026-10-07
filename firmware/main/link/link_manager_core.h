@@ -37,13 +37,15 @@ enum class EndReason {
     kShutdown,
 };
 
-// Bits of the tasks whose exit must be confirmed before destroying the pair's objects
+// Bits of the tasks whose exit must be confirmed before destroying the attempt's objects. Each
+// connect worker has its own bit (the audio worker's exit must not count for the control one).
 enum Task : uint32_t {
     kAudioRx = 1u << 0,
     kAudioTx = 1u << 1,
     kCtrlRx = 1u << 2,
     kCtrlTx = 1u << 3,
-    kConnWorker = 1u << 4,
+    kAudioWorker = 1u << 4,
+    kCtrlWorker = 1u << 5,
 };
 
 struct State {
@@ -52,8 +54,11 @@ struct State {
     uint32_t e = 0;           // the pair being built / bound / ended
     int64_t audio_hello_reply_us = 0;  // S6 starts here (receive time, §3.2)
     int64_t deadline_us = 0;  // the current stage's deadline (hello, S6, flush, exits)
-    uint32_t pending_exits = 0;  // Task bits still running while ending
-    uint32_t exited = 0;         // Task bits of this attempt that exited before the end
+    // Tasks of the current attempt: started (from the outputs and the connect results) and
+    // exited (from TaskExited, in any stage and order). The end waits for started & ~exited.
+    uint32_t started = 0;
+    uint32_t exited = 0;
+    uint32_t pending_exits = 0;  // started & ~exited while ending (kept for the tests and stat)
     bool flush_ctrl = false;  // ending after a violation: wait for the control queue first
     bool flushing = false;
     EndReason reason = EndReason::kNone;
@@ -68,13 +73,14 @@ struct State {
 
 enum class InKind {
     kTick,              // now_us, ctrl_last_rx_us
-    kConnectResult,     // attempt, ok, which (kAudioRx: audio link / kCtrlRx: control link)
+    kConnectResult,     // attempt, ok, which (kAudioRx: audio link / kCtrlRx: control link), e
+                        // (audio). The worker posts it before its own TaskExited.
     kAudioHelloReply,   // attempt, e (fw_epoch of the hello), ctrl_offered, at_us
     kCtrlHelloReply,    // e
     kReadySent,         // e
     kEndRequest,        // e, reason, flush (violation)
     kCtrlFlushed,       // e: the control send task drained (or failed) its queue
-    kTaskExited,        // e, task bit
+    kTaskExited,        // attempt, task bit (matched by the attempt: the epoch may be unknown)
     kShutdown,
 };
 
