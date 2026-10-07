@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "abort stops the current playback",
+      "note": "R1 の 3、R4、R2 の 5(A が変わらないので止めない)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "server_audio", "expect": {"outcome": "queued", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "abort", "gen": 1, "expect": {"outcome": "stopped", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 1, "result": "stopped"}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "server_audio", "expect": {"outcome": "dropped", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 1, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "server_audio", "expect": {"outcome": "queued", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": true, "speaking": true}}}
+      ]
+    },
+    {
+      "name": "abort overtakes its tts start",
+      "note": "R1 の 3(g > current_gen は正常)、R2 の 6(組を終えない)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "abort", "gen": 1, "expect": {"outcome": "stopped", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 1, "result": "stopped"}], "state": {"bound": true, "current_gen": 0, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "rejected", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "server_audio", "expect": {"outcome": "dropped", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 1, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": true, "speaking": true}}}
+      ]
+    },
+    {
+      "name": "next start applies a delayed abort first",
+      "note": "R2 の 4 → 5、その後の遅れた abort は R1 の 1(正常)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "server_audio", "expect": {"outcome": "queued", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 1, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": true, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "abort", "gen": 1, "expect": {"outcome": "already", "stopped": false, "sent": [{"type": "abort", "state": "done", "gen": 1, "result": "already"}], "state": {"bound": true, "current_gen": 2, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "server_audio", "expect": {"outcome": "queued", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": true, "speaking": true}}}
+      ]
+    },
+    {
+      "name": "duplicate abort is already",
+      "note": "R1 の 3 → R1 の 1",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "abort", "gen": 1, "expect": {"outcome": "stopped", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 1, "result": "stopped"}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "abort", "gen": 1, "expect": {"outcome": "already", "stopped": false, "sent": [{"type": "abort", "state": "done", "gen": 1, "result": "already"}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 0, "accepting": false, "speaking": false}}}
+      ]
+    },
+    {
+      "name": "late abort answers already with the requested gen",
+      "note": "R1 の 1(done の gen は要求の世代。aborted_gen・current_gen と取り違えない。レビュー120 Important 1)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "tts_start", "gen": 3, "aborted_gen": 2, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": true, "sent": [], "state": {"bound": true, "current_gen": 3, "aborted_gen": 2, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "abort", "gen": 1, "expect": {"outcome": "already", "stopped": false, "sent": [{"type": "abort", "state": "done", "gen": 1, "result": "already"}], "state": {"bound": true, "current_gen": 3, "aborted_gen": 2, "dev_abort_seq": 0, "accepting": true, "speaking": true}}}
+      ]
+    },
+    {
+      "name": "abort and duplicate of a later gen answer with that gen",
+      "note": "R1 の 3 → R1 の 1(done の gen を定数や別の値にしない。レビュー120 の掃除)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "abort", "gen": 2, "expect": {"outcome": "stopped", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 2, "result": "stopped"}], "state": {"bound": true, "current_gen": 2, "aborted_gen": 2, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "abort", "gen": 2, "expect": {"outcome": "already", "stopped": false, "sent": [{"type": "abort", "state": "done", "gen": 2, "result": "already"}], "state": {"bound": true, "current_gen": 2, "aborted_gen": 2, "dev_abort_seq": 0, "accepting": false, "speaking": false}}}
+      ]
+    },
+    {
+      "name": "abort before bind is ignored",
+      "note": "R1 の前提(結ばれた組)",
+      "steps": [
+        {"event": "abort", "gen": 1, "expect": {"outcome": "ignored", "stopped": false, "sent": [], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}}
+      ]
+    }
+  ]
+}

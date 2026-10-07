@@ -1,0 +1,54 @@
+abort.json	abort stops the current playback	7
+abort.json	abort overtakes its tts start	5
+abort.json	next start applies a delayed abort first	6
+abort.json	duplicate abort is already	4
+abort.json	late abort answers already with the requested gen	4
+abort.json	abort and duplicate of a later gen answer with that gen	4
+abort.json	abort before bind is ignored	3
+bind_and_start.json	tts start before bind is rejected	5
+bind_and_start.json	second bind is ignored	2
+bind_and_start.json	normal stop then next start does not stop	6
+bind_and_start.json	tts stop of another gen is ignored	4
+boundaries.json	tts stop of an aborted gen is ignored	4
+boundaries.json	normal stop of a later gen after an abort	6
+boundaries.json	tts stop of a newer gen is ignored	4
+boundaries.json	tts stop after an abort that overtook the next start is ignored	4
+boundaries.json	second abort after a restart stops again	6
+boundaries.json	dev_abort_seen ahead after a touch at a later gen ends the pair	4
+boundaries.json	unseen start keeps the larger aborted_gen	5
+boundaries.json	start covered by its own aborted_gen stops and is rejected	4
+boundaries.json	touch counter survives a normal stop	6
+boundaries.json	accepting a start keeps the larger aborted_gen	4
+boundaries.json	delayed abort applied at the next start keeps the touch counter	5
+boundaries.json	normal stop does not reopen acceptance	5
+boundaries.json	rejected start does not move current_gen	2
+boundaries.json	touch counter starts at 1 even when aborted_gen is set	3
+max_seen_k.json	touch then the same unseen K twice stays rejected	5
+max_seen_k.json	a seen K survives an abort	6
+max_seen_k.json	a seen K survives a second touch	7
+max_seen_k.json	a start that stops then rejects does not raise the seen K	3
+max_seen_k.json	an abort before any start does not raise the seen K	4
+max_seen_k.json	a start covered by its own aborted_gen does not raise the seen K	4
+max_seen_k.json	a rejected start that stops raises the seen K to its K	5
+max_seen_k.json	a normal stop does not raise the seen K	4
+max_seen_k.json	a seen K survives a normal stop	6
+max_seen_k.json	a touch does not raise the seen K	4
+max_seen_k.json	a seen K survives a touch	6
+pair_end.json	pair end resets and needs a new bind	7
+restart.json	same gen restart while speaking	4
+restart.json	same gen restart after tts stop	5
+restart.json	older gen start is rejected while a newer gen plays	4
+restart.json	restart of an aborted gen is rejected	5
+touch.json	touch stops and a start sent after the gateway saw it plays	5
+touch.json	start in flight during the touch is rejected without stop	6
+touch.json	request abort in flight then touch (review 113 Important 1)	7
+touch.json	rejected unseen start still raises aborted_gen	5
+touch.json	second touch rejects a start sent before the gateway saw it	8
+touch.json	touch counter is not the playback generation	4
+touch.json	touch when not speaking is ignored	5
+violations.json	abort between aborted_gen and current_gen ends the pair	4
+violations.json	violating abort answers with the requested gen	4
+violations.json	dev_abort_seen ahead of the device ends the pair	3
+violations.json	dev_abort_seen below the highest seen ends the pair	5
+violations.json	a rejected start still counts toward the highest seen K	6
+violations.json	without a seen K the same lower start is only rejected	5

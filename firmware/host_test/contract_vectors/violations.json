@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "abort between aborted_gen and current_gen ends the pair",
+      "note": "R1 の 2",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "abort", "gen": 1, "expect": {"outcome": "ended", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 1, "result": "stopped"}], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}}
+      ]
+    },
+    {
+      "name": "violating abort answers with the requested gen",
+      "note": "R1 の 2(done の gen は要求の世代。レビュー120 の掃除)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "tts_start", "gen": 3, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 3, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "abort", "gen": 2, "expect": {"outcome": "ended", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 2, "result": "stopped"}], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}}
+      ]
+    },
+    {
+      "name": "dev_abort_seen ahead of the device ends the pair",
+      "note": "R2 の 2",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 0, "dev_abort_seen": 1, "expect": {"outcome": "ended", "stopped": true, "sent": [], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}}
+      ]
+    },
+    {
+      "name": "dev_abort_seen below the highest seen ends the pair",
+      "note": "FW-A2 §2.3 の R2 の 2b(I2 の穴。見送りの一覧の 118 Minor 5)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "touch", "expect": {"outcome": "touched", "stopped": true, "sent": [{"type": "abort", "gen": 1, "dev_abort_seq": 1}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 1, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 1, "dev_abort_seen": 1, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 2, "aborted_gen": 1, "dev_abort_seq": 1, "accepting": true, "speaking": true}}},
+        {"event": "tts_start", "gen": 3, "aborted_gen": 5, "dev_abort_seen": 0, "expect": {"outcome": "ended", "stopped": true, "sent": [], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}}
+      ]
+    },
+    {
+      "name": "a rejected start still counts toward the highest seen K",
+      "note": "FW-A2 §2.3(拒んだ tts start の K も数える。Codex レビュー125 Important 7 の例)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "touch", "expect": {"outcome": "touched", "stopped": true, "sent": [{"type": "abort", "gen": 1, "dev_abort_seq": 1}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 1, "accepting": false, "speaking": false}}},
+        {"event": "abort", "gen": 3, "expect": {"outcome": "stopped", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 3, "result": "stopped"}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 3, "dev_abort_seq": 1, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 2, "aborted_gen": 1, "dev_abort_seen": 1, "expect": {"outcome": "rejected", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 3, "dev_abort_seq": 1, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 3, "aborted_gen": 3, "dev_abort_seen": 0, "expect": {"outcome": "ended", "stopped": true, "sent": [], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}}
+      ]
+    },
+    {
+      "name": "without a seen K the same lower start is only rejected",
+      "note": "上の対照(R2 の 3。見た K が 0 なら約束違反にしない)",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "touch", "expect": {"outcome": "touched", "stopped": true, "sent": [{"type": "abort", "gen": 1, "dev_abort_seq": 1}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 1, "accepting": false, "speaking": false}}},
+        {"event": "abort", "gen": 3, "expect": {"outcome": "stopped", "stopped": true, "sent": [{"type": "abort", "state": "done", "gen": 3, "result": "stopped"}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 3, "dev_abort_seq": 1, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 3, "aborted_gen": 3, "dev_abort_seen": 0, "expect": {"outcome": "rejected", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 3, "dev_abort_seq": 1, "accepting": false, "speaking": false}}}
+      ]
+    }
+  ]
+}

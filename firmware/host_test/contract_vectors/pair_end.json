@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "pair end resets and needs a new bind",
+      "note": "K2、R2 の 1",
+      "steps": [
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}},
+        {"event": "touch", "expect": {"outcome": "touched", "stopped": true, "sent": [{"type": "abort", "gen": 1, "dev_abort_seq": 1}], "state": {"bound": true, "current_gen": 1, "aborted_gen": 1, "dev_abort_seq": 1, "accepting": false, "speaking": false}}},
+        {"event": "pair_end", "expect": {"outcome": "reset", "stopped": true, "sent": [], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "rejected", "stopped": false, "sent": [], "state": {"bound": false, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "bind", "expect": {"outcome": "bound", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 0, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": false, "speaking": false}}},
+        {"event": "tts_start", "gen": 1, "aborted_gen": 0, "dev_abort_seen": 0, "expect": {"outcome": "accepted", "stopped": false, "sent": [], "state": {"bound": true, "current_gen": 1, "aborted_gen": 0, "dev_abort_seq": 0, "accepting": true, "speaking": true}}}
+      ]
+    }
+  ]
+}

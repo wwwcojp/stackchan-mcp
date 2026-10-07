@@ -97,3 +97,17 @@ add_executable(server_time_test
 target_include_directories(server_time_test PRIVATE ../main)
 target_link_libraries(server_time_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME server_time_test COMMAND server_time_test)
+
+# StackChan FW-A2 §2.1-2.3, §7.1-1: the playback gate core and the contract vectors
+add_library(playback_gate_core STATIC ../main/gate/playback_gate_core.cc)
+target_include_directories(playback_gate_core PUBLIC ../main/gate)
+
+add_executable(playback_gate_core_test test_playback_gate_core.cc)
+target_link_libraries(playback_gate_core_test PRIVATE GTest::gtest_main playback_gate_core)
+add_test(NAME playback_gate_core_test COMMAND playback_gate_core_test)
+
+add_executable(playback_gate_vectors_test test_playback_gate_vectors.cc)
+target_compile_definitions(playback_gate_vectors_test
+    PRIVATE CONTRACT_VECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/contract_vectors")
+target_link_libraries(playback_gate_vectors_test PRIVATE GTest::gtest_main playback_gate_core cjson)
+add_test(NAME playback_gate_vectors_test COMMAND playback_gate_vectors_test)
