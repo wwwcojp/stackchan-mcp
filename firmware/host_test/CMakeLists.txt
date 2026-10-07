@@ -124,3 +124,9 @@ target_include_directories(ui_controller_core PUBLIC ../main/ui)
 add_executable(ui_controller_core_test test_ui_controller_core.cc)
 target_link_libraries(ui_controller_core_test PRIVATE GTest::gtest_main ui_controller_core)
 add_test(NAME ui_controller_core_test COMMAND ui_controller_core_test)
+
+# StackChan FW-A2 §7.1-5: replay the TLA+ model traces through Step
+add_executable(ui_model_traces_test test_ui_model_traces.cc)
+target_compile_definitions(ui_model_traces_test PRIVATE MODEL_TRACES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/model_traces")
+target_link_libraries(ui_model_traces_test PRIVATE GTest::gtest_main ui_controller_core cjson)
+add_test(NAME ui_model_traces_test COMMAND ui_model_traces_test)
