@@ -93,8 +93,7 @@ StepResult Step(const State& s0, const Input& in) {
                         s.attempt++;
                         s.stage = Stage::kAudioConnect;
                         s.e = 0;
-                        s.started = kAudioWorker;
-                        s.exited = 0;
+                        s.started = kAudioWorker;  // exited was cleared by ToWaiting
                         s.reason = EndReason::kNone;
                         out->push_back(Out(OutKind::kConnectAudio, 0, s.attempt));
                     }

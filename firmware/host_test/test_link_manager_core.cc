@@ -348,40 +348,53 @@ TEST(LinkManagerCore, AnAttemptEndedBeforeItsEpochTakesTheEpochOfTheLateLink) {
     EXPECT_EQ(Step(s, Exited(1, kAudioWorker, 0)).out, std::vector<Output>({O(OutKind::kDestroy, E1)}));
 }
 
-// Every order of the shell's notices for one attempt (final reviews 135-137): the shell model
-// follows the handoff 10 rules only. A connect worker posts its result before its own exit; the
-// receive/send tasks of a link run from the moment the link is made (before the result), and may
-// exit at any time; a task that exits by itself posts EndRequest (in either order); deadlines and
-// Shutdown may come at any point. Destroy only when no task runs, Restart only when one does, and
-// while ending the core waits only for tasks that run.
+// Every order of the shell's notices over two attempts (final reviews 135-138). The shell model
+// follows the handoff 10 rules only:
+// - a connect worker posts its result before its own exit. A link it made runs its tasks from
+//   that moment (before the result). If the connect fails, the worker first tears down the link
+//   it made and confirms its tasks ended (it owns a failed attempt's objects), then posts the
+//   failure: so a failure never leaves link tasks to the manager;
+// - the receive/send tasks of a link may exit at any time, a task that exits by itself posts
+//   EndRequest (in either order, up to twice), the gate may post a violation EndRequest;
+// - deadlines, F1 and Shutdown may come at any point; the server may offer no control link or
+//   reply with another epoch; a failed attempt's worker may exit after the next attempt started.
+// Properties: Destroy only when no task of the attempt runs (and under the link's epoch); Restart
+// only when one runs; while ending, the core waits only for tasks that run and some task runs;
+// leaving an attempt without Destroy only when it has no link task running.
 TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
     struct Shell {
         State s;
         int64_t now = 0;
-        uint32_t alive = 0;
+        uint32_t alive = 0;          // tasks of the current attempt that run
+        uint32_t old_worker = 0;     // attempt of a failed attempt's worker that still runs
         bool audio_links = false, audio_result = false, hello_replied = false;
         bool ctrl_links = false, ctrl_result = false, ctrl_hello_replied = false, ready_sent = false;
-        bool hello_sent = false, ctrl_connecting = false, ctrl_hello_sent = false, ready_queued = false;
-        bool flush_pending = false, stop = false, end_posted = false, shut = false, done = false;
+        bool hello_sent = false, ctrl_hello_sent = false, ready_queued = false, flush_pending = false;
+        bool audio_made = false, ctrl_made = false;  // a worker makes its link once per attempt
+        bool f1 = false, shut = false, done = false;
+        int ends = 0;
     };
     auto key = [](const Shell& w) {
         const State& s = w.s;
         std::ostringstream k;
-        k << static_cast<int>(s.stage) << ',' << s.e << ',' << s.deadline_us << ',' << s.started << ','
-          << s.exited << ',' << s.pending_exits << ',' << s.flushing << s.flush_ctrl << s.shutdown
-          << s.ctrl_link_up << ',' << w.now << ',' << w.alive << ',' << w.audio_links << w.audio_result
+        k << static_cast<int>(s.stage) << ',' << s.attempt << ',' << s.e << ',' << s.deadline_us << ','
+          << s.retry_at_us << ',' << s.backoff_ms << ',' << s.started << ',' << s.exited << ','
+          << s.pending_exits << ',' << s.flushing << s.flush_ctrl << s.shutdown << s.ctrl_link_up << ','
+          << w.now << ',' << w.alive << ',' << w.old_worker << ',' << w.audio_links << w.audio_result
           << w.hello_replied << w.ctrl_links << w.ctrl_result << w.ctrl_hello_replied << w.ready_sent
-          << w.hello_sent << w.ctrl_connecting << w.ctrl_hello_sent << w.ready_queued << w.flush_pending
-          << w.stop << w.end_posted << w.shut << w.done;
+          << w.hello_sent << w.ctrl_hello_sent << w.ready_queued << w.flush_pending << w.f1 << w.shut
+          << w.done << w.ends << w.audio_made << w.ctrl_made;
         return k.str();
     };
+    auto active = [](Stage st) { return st != Stage::kWaiting && st != Stage::kStopped; };
     constexpr uint32_t kLinkTasks[] = {kAudioRx, kAudioTx, kCtrlRx, kCtrlTx};
+    constexpr uint32_t kMaxAttempts = 2;
     std::set<std::string> seen;
-    size_t steps = 0, destroys = 0, restarts = 0;
+    size_t steps = 0, destroys = 0, restarts = 0, failures = 0, audio_only = 0, second = 0;
     std::function<void(const Shell&)> walk = [&](const Shell& w) {
         if (w.done || ::testing::Test::HasFailure() || !seen.insert(key(w)).second) return;
         struct Ev {
-            bool step;  // false: inside the shell only (a link is made), no input to the core
+            bool step;  // false: inside the shell only, no input to the core
             Input in;
             std::function<void(Shell&)> f;
         };
@@ -389,42 +402,57 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
         auto add = [&](Input in, std::function<void(Shell&)> f) { evs.push_back({true, in, std::move(f)}); };
         auto inside = [&](std::function<void(Shell&)> f) { evs.push_back({false, Input{}, std::move(f)}); };
         const uint32_t a = w.s.attempt;
-        const bool connecting = (w.alive & kAudioWorker) && !w.audio_result;
-        if (connecting && !w.audio_links) {  // the link is made: its tasks start (no notice yet)
-            inside([](Shell& n) { n.audio_links = true; n.alive |= kAudioRx | kAudioTx; });
-        }
-        if (connecting) {
-            add(Connected(a, kAudioRx, w.audio_links, E1, w.now), [](Shell& n) { n.audio_result = true; });
+        // the audio connect worker
+        if ((w.alive & kAudioWorker) && !w.audio_result) {
+            if (!w.audio_links) {
+                if (!w.audio_made) {
+                    inside([](Shell& n) { n.audio_links = n.audio_made = true; n.alive |= kAudioRx | kAudioTx; });
+                }
+                add(Connected(a, kAudioRx, false, E1, w.now), [](Shell& n) { n.audio_result = true; });
+            } else {
+                add(Connected(a, kAudioRx, true, E1, w.now), [](Shell& n) { n.audio_result = true; });
+                inside([](Shell& n) { n.audio_links = false; n.alive &= ~(kAudioRx | kAudioTx); });  // tear down
+            }
         }
         if ((w.alive & kAudioWorker) && w.audio_result) {
             add(Exited(a, kAudioWorker, w.now), [](Shell& n) { n.alive &= ~kAudioWorker; });
         }
-        const bool cconnecting = (w.alive & kCtrlWorker) && !w.ctrl_result;
-        if (cconnecting && !w.ctrl_links) {
-            inside([](Shell& n) { n.ctrl_links = true; n.alive |= kCtrlRx | kCtrlTx; });
-        }
-        if (cconnecting) {
-            add(Connected(a, kCtrlRx, w.ctrl_links, E1, w.now), [](Shell& n) { n.ctrl_result = true; });
+        if (w.old_worker != 0) add(Exited(w.old_worker, kAudioWorker, w.now), [](Shell& n) { n.old_worker = 0; });
+        // the control connect worker
+        if ((w.alive & kCtrlWorker) && !w.ctrl_result) {
+            if (!w.ctrl_links) {
+                if (!w.ctrl_made) {
+                    inside([](Shell& n) { n.ctrl_links = n.ctrl_made = true; n.alive |= kCtrlRx | kCtrlTx; });
+                }
+                add(Connected(a, kCtrlRx, false, E1, w.now), [](Shell& n) { n.ctrl_result = true; });
+            } else {
+                add(Connected(a, kCtrlRx, true, E1, w.now), [](Shell& n) { n.ctrl_result = true; });
+                inside([](Shell& n) { n.ctrl_links = false; n.alive &= ~(kCtrlRx | kCtrlTx); });
+            }
         }
         if ((w.alive & kCtrlWorker) && w.ctrl_result) {
             add(Exited(a, kCtrlWorker, w.now), [](Shell& n) { n.alive &= ~kCtrlWorker; });
         }
+        // the gateway
         if (w.hello_sent && !w.hello_replied && (w.alive & kAudioRx)) {
             add(HelloReply(a, E1, true, w.now), [](Shell& n) { n.hello_replied = true; });
+            add(HelloReply(a, E1, false, w.now), [](Shell& n) { n.hello_replied = true; });
         }
         if (w.ctrl_hello_sent && !w.ctrl_hello_replied && (w.alive & kCtrlRx)) {
             add(WithE(InKind::kCtrlHelloReply, E1, w.now), [](Shell& n) { n.ctrl_hello_replied = true; });
+            add(WithE(InKind::kCtrlHelloReply, E1 + 1, w.now), [](Shell& n) { n.ctrl_hello_replied = true; });
         }
         if (w.ready_queued && !w.ready_sent && (w.alive & kCtrlTx)) {
             add(WithE(InKind::kReadySent, E1, w.now), [](Shell& n) { n.ready_sent = true; });
         }
+        // the link tasks, the gate, the clock
         for (uint32_t t : kLinkTasks) {
             if (w.alive & t) add(Exited(a, t, w.now), [t](Shell& n) { n.alive &= ~t; });
         }
-        if (w.audio_result && w.audio_links && !w.end_posted) {  // a task ends the pair (or the gate)
-            add(End(E1, EndReason::kAudioClosed, w.now), [](Shell& n) { n.end_posted = true; });
+        if (w.audio_result && w.s.e == E1 && w.ends < 2) {
+            add(End(E1, EndReason::kAudioClosed, w.now), [](Shell& n) { n.ends++; });
             if (w.s.stage == Stage::kBound) {
-                add(End(E1, EndReason::kViolation, w.now, true), [](Shell& n) { n.end_posted = true; });
+                add(End(E1, EndReason::kViolation, w.now, true), [](Shell& n) { n.ends++; });
             }
         }
         if (w.flush_pending && (w.alive & kCtrlTx)) {
@@ -434,27 +462,45 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
             const int64_t d = w.s.deadline_us;
             add(Tick(d, d), [d](Shell& n) { n.now = d; });
         }
+        if (w.s.stage == Stage::kBound && !w.f1) {
+            const int64_t t = w.now + kF1Us;
+            add(Tick(t, w.now), [t](Shell& n) { n.now = t; n.f1 = true; });
+        }
+        if (w.s.stage == Stage::kWaiting && !w.shut && a < kMaxAttempts) {
+            const int64_t t = std::max(w.now, w.s.retry_at_us);
+            add(Tick(t, t), [t](Shell& n) { n.now = t; });
+        }
         if (!w.shut) add(WithE(InKind::kShutdown, 0, w.now), [](Shell& n) { n.shut = true; });
         for (const Ev& ev : evs) {
             Shell n = w;
             ev.f(n);
             if (ev.step) {
+                const Stage before = n.s.stage;
                 const StepResult r = Step(n.s, ev.in);
                 n.s = r.state;
                 steps++;
+                bool destroyed = false;
                 for (const Output& o : r.out) {
                     switch (o.kind) {
-                        case OutKind::kConnectCtrl: n.alive |= kCtrlWorker; n.ctrl_connecting = true; break;
+                        case OutKind::kConnectAudio:
+                            ASSERT_EQ(n.alive & ~kAudioWorker, 0u) << "a new attempt while link tasks run";
+                            if (n.alive & kAudioWorker) n.old_worker = n.s.attempt - 1;
+                            n.alive = kAudioWorker;
+                            n.audio_links = n.audio_result = n.hello_replied = n.ctrl_links = n.ctrl_result = false;
+                            n.ctrl_hello_replied = n.ready_sent = n.hello_sent = n.ctrl_hello_sent = false;
+                            n.ready_queued = n.flush_pending = n.f1 = n.audio_made = n.ctrl_made = false;
+                            n.ends = 0;
+                            second += n.s.attempt == 2;
+                            break;
+                        case OutKind::kConnectCtrl: n.alive |= kCtrlWorker; break;
                         case OutKind::kSendAudioHello: n.hello_sent = true; break;
                         case OutKind::kSendCtrlHello: n.ctrl_hello_sent = true; break;
                         case OutKind::kSendReady: n.ready_queued = true; break;
                         case OutKind::kCloseQueues: n.flush_pending = o.keep_ctrl; break;
-                        case OutKind::kRequestStop: n.stop = true; break;
                         case OutKind::kDestroy:
                             ASSERT_EQ(n.alive, 0u) << "destroyed while a task runs (alive " << n.alive << ")";
-                            if (n.audio_links) ASSERT_EQ(o.e, E1) << "destroyed under another epoch";
+                            destroyed = true;
                             destroys++;
-                            n.done = true;
                             break;
                         case OutKind::kRestart:
                             ASSERT_NE(n.alive, 0u) << "restarted although every task stopped";
@@ -464,10 +510,24 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
                         default: break;
                     }
                 }
+                if (destroyed) {
+                    for (const Output& o : r.out) {
+                        if (o.kind == OutKind::kDestroy && w.audio_links) {
+                            ASSERT_EQ(o.e, E1) << "destroyed under another epoch";
+                        }
+                    }
+                }
+                if (active(before) && !active(n.s.stage) && !destroyed) {
+                    ASSERT_EQ(n.alive & ~kAudioWorker, 0u) << "left an attempt without Destroy while link tasks run";
+                    ASSERT_FALSE(n.audio_links || n.ctrl_links) << "left an attempt with a link";
+                    failures++;
+                }
+                if (n.s.stage == Stage::kAudioOnly) audio_only++;
                 if (!n.done && n.s.stage == Stage::kEnding) {
                     ASSERT_NE(n.alive, 0u) << "ending with no task running, not destroyed";
                     ASSERT_EQ(n.s.pending_exits & ~n.alive, 0u) << "waiting for a task that exited";
                 }
+                if (!active(n.s.stage) && n.s.attempt >= kMaxAttempts) n.done = true;
             }
             walk(n);
         }
@@ -479,5 +539,8 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
     walk(w0);
     EXPECT_GT(destroys, 100u);
     EXPECT_GT(restarts, 10u);
+    EXPECT_GT(failures, 10u);
+    EXPECT_GT(audio_only, 10u);
+    EXPECT_GT(second, 10u);
     EXPECT_GT(steps, 10000u);
 }
