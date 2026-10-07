@@ -117,3 +117,10 @@ add_executable(audio_origin_test test_audio_origin.cc ../main/audio/audio_origin
 target_include_directories(audio_origin_test PRIVATE ../main/audio)
 target_link_libraries(audio_origin_test PRIVATE GTest::gtest_main playback_gate_core)
 add_test(NAME audio_origin_test COMMAND audio_origin_test)
+
+# StackChan FW-A2 §2.4: UiController Step
+add_library(ui_controller_core STATIC ../main/ui/ui_controller_core.cc)
+target_include_directories(ui_controller_core PUBLIC ../main/ui)
+add_executable(ui_controller_core_test test_ui_controller_core.cc)
+target_link_libraries(ui_controller_core_test PRIVATE GTest::gtest_main ui_controller_core)
+add_test(NAME ui_controller_core_test COMMAND ui_controller_core_test)
