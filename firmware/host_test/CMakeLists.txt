@@ -169,3 +169,9 @@ target_compile_definitions(playback_gate_test
 target_include_directories(playback_gate_test PRIVATE ../main/gate ../main/net ../main/link)
 target_link_libraries(playback_gate_test PRIVATE GTest::gtest_main playback_gate_core cjson)
 add_test(NAME playback_gate_test COMMAND playback_gate_test)
+
+# StackChan FW-A2 plan 2A: the link manager shell (notice queue, tick, ports) and link phases
+add_executable(link_manager_test test_link_manager.cc ../main/link/link_manager.cc ../main/link/link_manager_core.cc)
+target_include_directories(link_manager_test PRIVATE ../main/link)
+target_link_libraries(link_manager_test PRIVATE GTest::gtest_main)
+add_test(NAME link_manager_test COMMAND link_manager_test)
