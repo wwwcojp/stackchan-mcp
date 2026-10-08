@@ -53,7 +53,10 @@ void LinkManager::RunOnce() {
         Run(Step(s_, t));
         return;
     }
-    if (auto in = queue_->Take(next_tick_us_ - now)) Run(Step(s_, *in));
+    if (auto in = queue_->Take(next_tick_us_ - now)) {
+        in->now_us = ports_->NowUs();  // the shell's clock: a producer cannot move the deadlines
+        Run(Step(s_, *in));
+    }
 }
 
 void LinkManager::Run(const StepResult& r) {

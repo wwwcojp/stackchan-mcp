@@ -252,3 +252,34 @@ TEST(LinkManagerShell, AViolationKeepsTheControlQueueToFlushTheDone) {
     r.Feed(end);
     EXPECT_NE(std::find(r.ports.log.begin(), r.ports.log.end(), "close " + FakePorts::N(E) + " keep"), r.ports.log.end());
 }
+
+// Claude review 146 Important 1: the shell stamps every notice it takes with its own clock, so a
+// producer that leaves now_us at 0 cannot move the deadlines back to the epoch of the clock.
+TEST(LinkManagerShell, NoticesAreStampedWithTheShellsClock) {
+    Rig r;
+    r.ports.now = 100 * S;
+    r.m.RunOnce();  // tick: connect
+    r.Feed(Result(kAudioRx, true));  // now_us left at 0 by the producer
+    r.ports.now += kTickUs;
+    r.m.RunOnce();  // tick: the hello deadline is 5 s after the result, not after 0
+    EXPECT_EQ(r.ports.log, (std::vector<std::string>{"connect_audio 1", "audio_hello 1 " + FakePorts::N(E)}));
+
+    Rig f;  // a failed connect: the next attempt waits for the worker's exit, then backs off
+    f.ports.now = 100 * S;
+    f.m.RunOnce();
+    f.Feed(Result(kAudioRx, false));
+    f.ports.now += kTickUs;
+    f.m.RunOnce();  // a tick while the failed connect's worker still runs: wait, no restart
+    Input exited = In(InKind::kTaskExited, 0, 1);
+    exited.which = kAudioWorker;
+    f.Feed(exited);
+    EXPECT_EQ(f.ports.log, (std::vector<std::string>{"connect_audio 1"}));
+    for (int i = 0; i < 300; i++) {  // 30 s of ticks
+        f.ports.now += kTickUs;
+        f.m.RunOnce();
+    }
+    EXPECT_EQ(std::count(f.ports.log.begin(), f.ports.log.end(), "connect_audio 2"), 1);
+    EXPECT_EQ(std::count_if(f.ports.log.begin(), f.ports.log.end(),
+                            [](const std::string& s) { return s.rfind("restart", 0) == 0; }),
+              0);
+}
