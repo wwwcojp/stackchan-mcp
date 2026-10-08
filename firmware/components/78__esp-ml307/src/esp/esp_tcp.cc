@@ -8,6 +8,8 @@
 #include <netdb.h>
 #include <errno.h>
 
+#include "sock_slice.h"
+
 static const char *TAG = "EspTcp";
 
 EspTcp::EspTcp() {
@@ -15,7 +17,16 @@ EspTcp::EspTcp() {
 }
 
 EspTcp::~EspTcp() {
-    Disconnect();
+    if (managed_) {
+        // StackChan FW-A2 (change 4): the owner destroys a managed link only after its receive
+        // task has ended, so the socket is closed here and nowhere else.
+        if (tcp_fd_ != -1) {
+            close(tcp_fd_);
+            tcp_fd_ = -1;
+        }
+    } else {
+        Disconnect();
+    }
 
     if (event_group_ != nullptr) {
         vEventGroupDelete(event_group_);
@@ -151,4 +162,101 @@ void EspTcp::ReceiveTask() {
 
 int EspTcp::GetLastError() {
     return last_error_;
+}
+
+// ---- StackChan FW-A2 (design §4.2 changes 1-5) ----
+
+bool EspTcp::ConnectManaged(const std::string& ipv4, int port, int timeout_ms, const std::function<bool()>& stop) {
+    managed_ = true;
+    int err = 0;
+    tcp_fd_ = sockslice::ConnectWithin(ipv4.c_str(), static_cast<uint16_t>(port), timeout_ms, stop, &err);
+    if (tcp_fd_ < 0) {
+        last_error_ = err;
+        ESP_LOGW(TAG, "Connect to %s:%d failed: errno=%d", ipv4.c_str(), port, err);
+        return false;
+    }
+    link_up_.store(true);
+    return true;
+}
+
+int EspTcp::ReceiveSlice(char* buf, size_t len, int timeout_ms, bool* closed) {
+    return sockslice::RecvSlice(tcp_fd_, buf, len, timeout_ms, closed);
+}
+
+bool EspTcp::StartReceive(const EspTcpTaskOptions& options, std::function<void()> on_exit, std::string preload) {
+    on_exit_ = std::move(on_exit);
+    preload_ = std::move(preload);
+    xEventGroupClearBits(event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
+    const BaseType_t ok = xTaskCreate([](void* arg) {
+        EspTcp* tcp = static_cast<EspTcp*>(arg);
+        tcp->ManagedReceiveTask();
+        {
+            // Take what is needed off the object before the stopped bit: after it the owner may
+            // destroy the object. The scope ends before vTaskDelete, which never returns, so the
+            // function object is destroyed (no leak per link: Codex review 148 Important 1).
+            std::function<void()> on_exit = std::move(tcp->on_exit_);
+            xEventGroupSetBits(tcp->event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
+            if (on_exit) {
+                on_exit();
+            }
+        }
+        vTaskDelete(NULL);
+    }, options.name, options.stack, this, options.priority, &receive_task_handle_);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start the receive task %s", options.name);
+        on_exit_ = nullptr;
+        return false;
+    }
+    receive_started_ = true;
+    return true;
+}
+
+void EspTcp::ManagedReceiveTask() {
+    if (!preload_.empty() && stream_callback_) {
+        stream_callback_(preload_);  // the bytes that came with the handshake, on this task
+    }
+    preload_.clear();
+    std::string data;
+    while (!stop_.load()) {
+        data.resize(1500);
+        bool closed = false;
+        const int n = sockslice::RecvSlice(tcp_fd_, data.data(), data.size(), sockslice::kSliceMs, &closed);
+        if (n == 0) {
+            continue;  // a slice passed: look at the stop request again (change 2)
+        }
+        if (n < 0) {
+            // A passive end: shut the socket down but keep the descriptor (change 4), so a send
+            // task still using it never meets a reused descriptor number.
+            if (!closed) {
+                ESP_LOGW(TAG, "Receive failed: errno=%d", errno);
+            }
+            link_up_.store(false);
+            shutdown(tcp_fd_, SHUT_RDWR);
+            if (disconnect_callback_) {
+                disconnect_callback_();
+            }
+            break;
+        }
+        data.resize(n);
+        if (stream_callback_) {
+            stream_callback_(data);
+        }
+    }
+}
+
+int EspTcp::SendSlice(const uint8_t* data, size_t len, int64_t timeout_us) {
+    return sockslice::SendSlice(tcp_fd_, data, len, timeout_us);
+}
+
+void EspTcp::RequestStop() {
+    stop_.store(true);
+}
+
+bool EspTcp::WaitStopped(int timeout_ms) {
+    if (!receive_started_) {
+        return true;
+    }
+    const EventBits_t bits = xEventGroupWaitBits(event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT, pdFALSE, pdFALSE,
+                                                 pdMS_TO_TICKS(timeout_ms));
+    return (bits & ESP_TCP_EVENT_RECEIVE_TASK_EXIT) != 0;
 }

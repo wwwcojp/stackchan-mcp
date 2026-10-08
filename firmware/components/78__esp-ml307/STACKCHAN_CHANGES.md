@@ -19,3 +19,17 @@ use them); the changes are new entry points.
    broken frames and lengths over a limit are errors that stay), a masked client-frame encoder and
    the opening handshake (request, response). Nothing answers a ping here: the link does it
    through its send queue.
+2. **Socket steps with deadlines (changes 1-3):** `include/sock_slice.h`, `src/sock_slice.cc`. POSIX
+   calls only (lwIP on the device, Linux loopback in `firmware/host_test/test_sock_slice.cc`): a
+   connect to a dotted IPv4 address within a deadline (non-blocking `connect()` and `select()` in
+   200 ms slices that look at a stop request), one send and one receive within a timeout
+   (`SO_SNDTIMEO` / `SO_RCVTIMEO`; under 1 ms is refused, as lwIP takes 0 as "forever").
+3. **`EspTcp` managed links (changes 1-5):** `src/esp/esp_tcp.{h,cc}`. New entry points beside the
+   unchanged `Connect()` / `Disconnect()` / `Send()`: `ConnectManaged` (change 1, no receive task
+   yet), `ReceiveSlice` (the handshake before the task), `StartReceive` with its own name, priority
+   and stack (changes 2 and 5: 200 ms receive slices that look at the stop request; a passive end
+   shuts the socket down and keeps the descriptor; `on_exit` runs last on the task), `SendSlice`
+   (change 3: the caller cuts the deadline with `firmware/main/net/send_deadline`), `RequestStop` /
+   `WaitStopped` (change 4). A managed object closes its socket only in its destructor, which the
+   owner calls after the receive task ended (change 4). `esp_tcp.h` moved from `src/esp/` to
+   `include/` so the FW's links can use these entry points.

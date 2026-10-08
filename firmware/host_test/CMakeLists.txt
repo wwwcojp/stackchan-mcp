@@ -193,3 +193,9 @@ add_executable(ws_frame_test test_ws_frame.cc ../components/78__esp-ml307/src/ws
 target_include_directories(ws_frame_test PRIVATE ../components/78__esp-ml307/include)
 target_link_libraries(ws_frame_test PRIVATE GTest::gtest_main)
 add_test(NAME ws_frame_test COMMAND ws_frame_test)
+
+# StackChan FW-A2 plan 2B-1: socket steps with deadlines of the vendored esp-ml307 (design §4.2 changes 1-3)
+add_executable(sock_slice_test test_sock_slice.cc ../components/78__esp-ml307/src/sock_slice.cc)
+target_include_directories(sock_slice_test PRIVATE ../components/78__esp-ml307/include)
+target_link_libraries(sock_slice_test PRIVATE GTest::gtest_main)
+add_test(NAME sock_slice_test COMMAND sock_slice_test)

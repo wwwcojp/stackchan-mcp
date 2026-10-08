@@ -7,6 +7,7 @@ set(COMMON_SRCS
     "src/esp/esp_udp.cc"
     "src/web_socket.cc"
     "src/ws_frame.cc"
+    "src/sock_slice.cc"
     "src/http_client.cc"
 )
 
