@@ -221,3 +221,10 @@ add_executable(rx_link_test test_rx_link.cc ../main/link/rx_link.cc ../main/link
 target_include_directories(rx_link_test PRIVATE ../main/link ../main/net ../components/78__esp-ml307/include)
 target_link_libraries(rx_link_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME rx_link_test COMMAND rx_link_test)
+
+# StackChan FW-A2 plan 2B-1: what one connect worker does before it touches a socket (design §3.6, contract S3)
+add_executable(connect_plan_test test_connect_plan.cc ../main/link/connect_plan.cc ../main/link/gateway_target.cc
+    ../main/link/wire.cc)
+target_include_directories(connect_plan_test PRIVATE ../main/link ../main/net ../components/78__esp-ml307/include)
+target_link_libraries(connect_plan_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME connect_plan_test COMMAND connect_plan_test)
