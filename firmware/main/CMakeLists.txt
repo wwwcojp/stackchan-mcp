@@ -1028,6 +1028,30 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
         espressif__touch_button_sensor
     )
 endif()
+# StackChan FW-A2 plans 1, 2A and 2B-1: the gate, UiController, the link manager and the
+# connection side. Built but not called yet: plan 2B-2 switches the FW over to them.
+list(APPEND SOURCES
+    "audio/audio_origin.cc"
+    "audio/playback_book.cc"
+    "gate/playback_gate_core.cc"
+    "gate/playback_gate.cc"
+    "ui/ui_controller_core.cc"
+    "ui/ui_controller.cc"
+    "link/link_manager_core.cc"
+    "link/link_manager.cc"
+    "link/wire.cc"
+    "link/gateway_target.cc"
+    "link/rx_route.cc"
+    "link/rx_link.cc"
+    "link/tx_loop.cc"
+    "link/connect_plan.cc"
+    "link/link_esp.cc"
+    "link/link_hub.cc"
+    "net/send_queue.cc"
+    "net/send_deadline.cc"
+)
+list(APPEND INCLUDE_DIRS "gate" "ui" "link" "net")
+
 if(CONFIG_STACKCHAN_MDNS_DISCOVERY)
     list(APPEND SOURCES "protocols/mdns_candidate_extract.cc")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__mdns)

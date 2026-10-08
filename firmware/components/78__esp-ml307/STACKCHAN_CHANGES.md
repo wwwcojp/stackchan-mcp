@@ -33,3 +33,8 @@ use them); the changes are new entry points.
    `WaitStopped` (change 4). A managed object closes its socket only in its destructor, which the
    owner calls after the receive task ended (change 4). `esp_tcp.h` moved from `src/esp/` to
    `include/` so the FW's links can use these entry points.
+
+Not in this directory: the rest of change 6 (the opening handshake within a deadline, every frame
+passed to the receive side, pings answered through the link's send queue, frames built only by the
+send task) is the FW's link (`main/link/link_esp`, `rx_link`, `tx_loop`), on top of items 1-3.
+Change 7 (`ws://` only, a host name refused) is `main/link/gateway_target` (`ParseWsTarget`).
