@@ -6,9 +6,9 @@
 namespace stackchan::ui {
 
 Action SetDisplay(Disp d) { Action a{ActKind::kSetDisplay}; a.disp = d; return a; }
-Action SendListenStart(uint32_t e, Mode m) { Action a{ActKind::kSendListenStart}; a.e = e; a.mode = m; return a; }
-Action SendListenStop(uint32_t e) { Action a{ActKind::kSendListenStop}; a.e = e; return a; }
-Action SendWakeWord(uint32_t e) { Action a{ActKind::kSendWakeWord}; a.e = e; return a; }
+Action SendListenStart(uint64_t e, Mode m) { Action a{ActKind::kSendListenStart}; a.e = e; a.mode = m; return a; }
+Action SendListenStop(uint64_t e) { Action a{ActKind::kSendListenStop}; a.e = e; return a; }
+Action SendWakeWord(uint64_t e) { Action a{ActKind::kSendWakeWord}; a.e = e; return a; }
 Action MicOn(Profile p) { Action a{ActKind::kMicOn}; a.profile = p; return a; }
 Action ArmTimer(uint32_t req) { Action a{ActKind::kArmTimer}; a.req = req; return a; }
 Action WakeDetect(bool on) { Action a{ActKind::kWakeDetect}; a.on = on; return a; }

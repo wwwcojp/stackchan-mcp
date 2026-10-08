@@ -119,7 +119,7 @@ bool Apply(const cJSON* step, g::State* s, g::Result* r) {
     const cJSON* ev = cJSON_GetObjectItemCaseSensitive(step, "event");
     if (!cJSON_IsString(ev)) return false;
     const std::string name = ev->valuestring;
-    const uint32_t e = s->bound_e;
+    const uint64_t e = s->bound_e;
     uint32_t gen = 0, a = 0, k = 0;
     if (name == "bind") {
         if (cJSON_GetArraySize(step) != 2) return false;

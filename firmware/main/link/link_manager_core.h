@@ -51,7 +51,7 @@ enum Task : uint32_t {
 struct State {
     Stage stage = Stage::kWaiting;
     uint32_t attempt = 0;     // connect attempt id (results of older attempts are dropped)
-    uint32_t e = 0;           // the pair being built / bound / ended
+    uint64_t e = 0;           // the pair being built / bound / ended
     int64_t audio_hello_reply_us = 0;  // S6 starts here (receive time, §3.2)
     int64_t deadline_us = 0;  // the current stage's deadline (hello, S6, flush, exits)
     // Tasks of the current attempt: started (from the outputs and the connect results) and
@@ -89,7 +89,7 @@ struct Input {
     int64_t now_us = 0;
     int64_t ctrl_last_rx_us = 0;
     uint32_t attempt = 0;
-    uint32_t e = 0;
+    uint64_t e = 0;
     bool ok = false;
     bool ctrl_offered = false;
     uint32_t which = 0;
@@ -118,7 +118,7 @@ enum class OutKind {
 struct Output {
     OutKind kind;
     uint32_t attempt = 0;
-    uint32_t e = 0;
+    uint64_t e = 0;
     EndReason reason = EndReason::kNone;
     bool keep_ctrl = false;
     bool operator==(const Output& o) const {

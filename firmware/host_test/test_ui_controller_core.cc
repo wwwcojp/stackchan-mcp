@@ -33,33 +33,33 @@ Event Toggle(TouchReply r) {
     e.reply = r;
     return e;
 }
-Event Gate(uint32_t pair, bool spk, uint32_t rev) {
+Event Gate(uint64_t pair, bool spk, uint32_t rev) {
     Event e = Ev(EvKind::kGateChanged);
     e.e = pair;
     e.spk = spk;
     e.rev = rev;
     return e;
 }
-Event LinkUp(uint32_t pair, bool spk = false, uint32_t rev = 0) {
+Event LinkUp(uint64_t pair, bool spk = false, uint32_t rev = 0) {
     Event e = Ev(EvKind::kLinkUp);
     e.e = pair;
     e.spk = spk;
     e.rev = rev;
     return e;
 }
-Event LinkDown(uint32_t pair) {
+Event LinkDown(uint64_t pair) {
     Event e = Ev(EvKind::kLinkDown);
     e.e = pair;
     return e;
 }
-Event GwStart(uint32_t pair, Mode m = Mode::kManualStop, Profile p = Profile::kVoice) {
+Event GwStart(uint64_t pair, Mode m = Mode::kManualStop, Profile p = Profile::kVoice) {
     Event e = Ev(EvKind::kGwListenStart);
     e.e = pair;
     e.mode = m;
     e.profile = p;
     return e;
 }
-Event GwStop(uint32_t pair) {
+Event GwStop(uint64_t pair) {
     Event e = Ev(EvKind::kGwListenStop);
     e.e = pair;
     return e;
@@ -74,18 +74,18 @@ State RunAll(State s, const std::vector<Event>& evs) {
     for (const auto& e : evs) s = Step(s, e).state;
     return s;
 }
-State Ready(uint32_t pair = 1) { return RunAll(State{}, {Ev(EvKind::kResync), LinkUp(pair)}); }
-State Listening(uint32_t pair = 1) { return RunAll(Ready(pair), {Touch(TouchReply::kNotSpeaking)}); }
-State Speaking(uint32_t pair = 1) { return RunAll(Ready(pair), {Gate(pair, true, 1)}); }
+State Ready(uint64_t pair = 1) { return RunAll(State{}, {Ev(EvKind::kResync), LinkUp(pair)}); }
+State Listening(uint64_t pair = 1) { return RunAll(Ready(pair), {Touch(TouchReply::kNotSpeaking)}); }
+State Speaking(uint64_t pair = 1) { return RunAll(Ready(pair), {Gate(pair, true, 1)}); }
 
 using A = std::vector<Action>;
 
 // the K151 build: no wake word detection while listening (wake_in_listening off)
-A StartManual(uint32_t e, uint32_t req, Profile p = Profile::kVoice, Mode m = Mode::kManualStop) {
+A StartManual(uint64_t e, uint32_t req, Profile p = Profile::kVoice, Mode m = Mode::kManualStop) {
     return {SetDisplay(Disp::kListening), SendListenStart(e, m), Simple(ActKind::kClearForListening),
             MicOn(p), Simple(ActKind::kPlayPopup), ArmTimer(req), WakeDetect(false)};
 }
-A Stop(uint32_t e) {
+A Stop(uint64_t e) {
     return {SendListenStop(e), Simple(ActKind::kMicOff), Simple(ActKind::kCancelTimer),
             SetDisplay(Disp::kIdle), WakeDetect(true)};
 }
@@ -406,7 +406,7 @@ TEST(UiControllerCore, EveryShortSequenceKeepsEffectsAndStateInStep) {
             if (w.fired > 0) v.push_back(Wake(r, Mode::kAutoStop, s.grev + 1));
             v.push_back(Toggle(r));
         }
-        const uint32_t e = s.e != 0 ? s.e : 1;
+        const uint64_t e = s.e != 0 ? s.e : 1;
         v.push_back(Gate(e, true, s.grev + 1));
         v.push_back(Gate(e, false, s.grev + 1));
         if (s.e == 0) {
@@ -490,4 +490,21 @@ TEST(UiControllerCore, EveryShortSequenceKeepsEffectsAndStateInStep) {
         walk(w0, 6);
     }
     EXPECT_GT(steps, 1000000u);
+}
+
+// FW-A2 design §3.1 (v10): E above 2^32 is kept whole; an event for its low 32 bits is another
+// pair (Codex review 140 Important 2).
+TEST(UiControllerCore, EpochAbove32BitsIsKeptWhole) {
+    const uint64_t e = 65536ull * 65536 + 3;  // boot_count 65536, conn_index 3
+    State s = Listening(e);
+    EXPECT_EQ(s.e, e);
+    EXPECT_EQ(s.chan_e, e);
+    const StepResult other = Step(s, GwStop(e & 0xFFFFFFFFull));
+    EXPECT_TRUE(other.stale);
+    EXPECT_EQ(other.state.disp, Disp::kListening);
+    const StepResult stop = Step(s, GwStop(e));
+    EXPECT_EQ(stop.state.disp, Disp::kIdle);
+    ASSERT_FALSE(stop.actions.empty());
+    EXPECT_EQ(stop.actions.front(), SendListenStop(e));
+    EXPECT_EQ(stop.actions.front().e, e);  // the builder and the action field keep all 64 bits
 }

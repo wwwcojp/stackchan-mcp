@@ -15,7 +15,7 @@ using namespace stackchan::link;
 namespace {
 
 constexpr int64_t S = 1'000'000;  // 1 s in us
-constexpr uint32_t E1 = 0x10001;
+constexpr uint64_t E1 = 0x10001;
 
 Input Tick(int64_t now, int64_t ctrl_rx = 0) {
     Input i;
@@ -24,7 +24,7 @@ Input Tick(int64_t now, int64_t ctrl_rx = 0) {
     i.ctrl_last_rx_us = ctrl_rx;
     return i;
 }
-Input Connected(uint32_t attempt, uint32_t which, bool ok, uint32_t e = E1, int64_t now = 0) {
+Input Connected(uint32_t attempt, uint32_t which, bool ok, uint64_t e = E1, int64_t now = 0) {
     Input i;
     i.kind = InKind::kConnectResult;
     i.attempt = attempt;
@@ -34,7 +34,7 @@ Input Connected(uint32_t attempt, uint32_t which, bool ok, uint32_t e = E1, int6
     i.now_us = now;
     return i;
 }
-Input HelloReply(uint32_t attempt, uint32_t e, bool ctrl, int64_t at) {
+Input HelloReply(uint32_t attempt, uint64_t e, bool ctrl, int64_t at) {
     Input i;
     i.kind = InKind::kAudioHelloReply;
     i.attempt = attempt;
@@ -44,14 +44,14 @@ Input HelloReply(uint32_t attempt, uint32_t e, bool ctrl, int64_t at) {
     i.now_us = at;
     return i;
 }
-Input WithE(InKind k, uint32_t e, int64_t now = 0) {
+Input WithE(InKind k, uint64_t e, int64_t now = 0) {
     Input i;
     i.kind = k;
     i.e = e;
     i.now_us = now;
     return i;
 }
-Input End(uint32_t e, EndReason r, int64_t now, bool flush = false) {
+Input End(uint64_t e, EndReason r, int64_t now, bool flush = false) {
     Input i = WithE(InKind::kEndRequest, e, now);
     i.reason = r;
     i.flush = flush;
@@ -64,7 +64,7 @@ Input Exited(uint32_t attempt, uint32_t task, int64_t now) {
     return i;
 }
 
-Output O(OutKind k, uint32_t e = 0, uint32_t attempt = 0) {
+Output O(OutKind k, uint64_t e = 0, uint32_t attempt = 0) {
     Output o{k};
     o.e = e;
     o.attempt = attempt;
@@ -543,4 +543,23 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
     EXPECT_GT(audio_only, 10u);
     EXPECT_GT(second, 10u);
     EXPECT_GT(steps, 10000u);
+}
+
+// FW-A2 design §3.1 (v10): E above 2^32 is kept whole through the attempt; an end request for
+// its low 32 bits is for another pair (Codex review 140 Important 2).
+TEST(LinkManagerCore, EpochAbove32BitsIsKeptWhole) {
+    const uint64_t e = 65536ull * 65536 + 3;  // boot_count 65536, conn_index 3
+    State s = Step(State{}, Tick(0)).state;
+    ASSERT_EQ(s.stage, Stage::kAudioConnect);
+    const StepResult connected = Step(s, Connected(s.attempt, kAudioRx, true, e, 0));
+    EXPECT_EQ(connected.state.e, e);
+    ASSERT_FALSE(connected.out.empty());
+    EXPECT_EQ(connected.out.back().e, e);
+    s = Step(connected.state, HelloReply(s.attempt, e, true, 1)).state;
+    const StepResult other = Step(s, End(e & 0xFFFFFFFFull, EndReason::kAudioClosed, 2));
+    EXPECT_EQ(other.state.stage, s.stage);
+    EXPECT_EQ(other.state.stale_inputs, s.stale_inputs + 1);
+    const StepResult end = Step(s, End(e, EndReason::kAudioClosed, 2));
+    EXPECT_EQ(end.state.stage, Stage::kEnding);
+    EXPECT_EQ(end.state.e, e);
 }

@@ -8,8 +8,8 @@ namespace g = stackchan::gate;
 
 namespace {
 
-g::State Bound(uint32_t e = 1) { return g::Bind(g::State{}, e).state; }
-g::State Playing(uint32_t e = 1, uint32_t gen = 1) { return g::OnTtsStart(Bound(e), e, gen, 0, 0).state; }
+g::State Bound(uint64_t e = 1) { return g::Bind(g::State{}, e).state; }
+g::State Playing(uint64_t e = 1, uint32_t gen = 1) { return g::OnTtsStart(Bound(e), e, gen, 0, 0).state; }
 
 bool SameContractState(const g::State& a, const g::State& b) {
     return a.bound_e == b.bound_e && a.last_ended_e == b.last_ended_e && a.dead == b.dead &&
@@ -131,4 +131,19 @@ TEST(PlaybackGateCore, ClearForListeningOnlyWhileNotSpeaking) {
     EXPECT_TRUE(g::ShouldClearForListening(Bound(1)));
     EXPECT_FALSE(g::ShouldClearForListening(Playing(1)));
     EXPECT_TRUE(g::ShouldClearForListening(g::OnTtsStop(Playing(1), 1, 1).state));
+}
+
+// FW-A2 design §3.1 (v10): E is the 64-bit fw_epoch (boot_count * 65536 + conn_index). From
+// boot_count 65536 on it exceeds 2^32; a 32-bit E would wrap and the next Bind would be refused
+// (Codex review 140 Important 2).
+TEST(PlaybackGateCore, EpochAbove32BitsIsKeptWhole) {
+    const uint64_t e1 = 65535ull * 65536 + 5;  // boot_count 65535, conn_index 5 (0xFFFF0005)
+    const uint64_t e2 = 65536ull * 65536 + 3;  // boot_count 65536, conn_index 3 (0x1'0000'0003)
+    g::State s = g::Unbind(Bound(e1), e1).state;
+    const g::Result r = g::Bind(s, e2);
+    EXPECT_EQ(r.outcome, g::Outcome::kBound);
+    EXPECT_EQ(r.state.bound_e, e2);
+    // a message for the low 32 bits of E is another pair
+    EXPECT_EQ(g::OnTouch(r.state, e2 & 0xFFFFFFFFull).outcome, g::Outcome::kStale);
+    EXPECT_EQ(g::Unbind(r.state, e2).state.last_ended_e, e2);
 }

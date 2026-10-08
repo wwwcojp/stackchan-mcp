@@ -18,8 +18,8 @@ enum class Profile { kVoice, kRaw };
 struct State {
     Disp disp = Disp::kOther;  // starts suspended (Starting/Activating) until Resync
     bool suspended = true;
-    uint32_t e = 0;       // bound pair (0 = none)
-    uint32_t chan_e = 0;  // logical channel's pair (0 = closed)
+    uint64_t e = 0;       // bound pair (0 = none)
+    uint64_t chan_e = 0;  // logical channel's pair (0 = closed)
     bool gspk = false;    // what we know of the gate's speaking
     uint32_t grev = 0;    // the gate rev that knowledge is from
     uint32_t req = 0;     // the current listening request (+1 per start)
@@ -53,7 +53,7 @@ enum class EvKind {
 
 struct Event {
     EvKind kind = EvKind::kTouch;
-    uint32_t e = 0;        // GateChanged / LinkUp / LinkDown / GwListen*
+    uint64_t e = 0;        // GateChanged / LinkUp / LinkDown / GwListen*
     bool spk = false;      // GateChanged / LinkUp
     uint32_t rev = 0;      // GateChanged / LinkUp / the OnTouch reply
     uint32_t req = 0;      // ListenTimeout
@@ -82,7 +82,7 @@ enum class ActKind {
 struct Action {
     ActKind kind;
     Disp disp = Disp::kIdle;
-    uint32_t e = 0;
+    uint64_t e = 0;
     uint32_t req = 0;
     Mode mode = Mode::kManualStop;
     Profile profile = Profile::kVoice;
@@ -108,9 +108,9 @@ bool NeedsGateDecision(const State& s, const Event& ev);
 
 // Action builders (also used by tests)
 Action SetDisplay(Disp d);
-Action SendListenStart(uint32_t e, Mode m);
-Action SendListenStop(uint32_t e);
-Action SendWakeWord(uint32_t e);
+Action SendListenStart(uint64_t e, Mode m);
+Action SendListenStop(uint64_t e);
+Action SendWakeWord(uint64_t e);
 Action MicOn(Profile p);
 Action ArmTimer(uint32_t req);
 Action WakeDetect(bool on);

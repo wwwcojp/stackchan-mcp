@@ -9,8 +9,8 @@
 namespace stackchan::gate {
 
 struct State {
-    uint32_t bound_e = 0;       // pair epoch E this gate is bound to (0 = none)
-    uint32_t last_ended_e = 0;  // last pair ended by Unbind (Bind needs E > this)
+    uint64_t bound_e = 0;       // pair epoch E this gate is bound to (0 = none)
+    uint64_t last_ended_e = 0;  // last pair ended by Unbind (Bind needs E > this)
     bool dead = false;          // the pair is being ended; every entry but Unbind is ignored
     uint32_t current_gen = 0;
     uint32_t aborted_gen = 0;
@@ -57,18 +57,18 @@ struct Result {
 };
 
 // S4.2 / K2 (design §2.2 "組の切り替え")
-Result Bind(const State& s, uint32_t e);
-Result Unbind(const State& s, uint32_t e);
+Result Bind(const State& s, uint64_t e);
+Result Unbind(const State& s, uint64_t e);
 // R2 (+R2.2b), R3, R1, R4 on the given pair
-Result OnTtsStart(const State& s, uint32_t e, uint32_t gen, uint32_t aborted_gen,
+Result OnTtsStart(const State& s, uint64_t e, uint32_t gen, uint32_t aborted_gen,
                   uint32_t dev_abort_seen);
-Result OnTtsStop(const State& s, uint32_t e, uint32_t gen);
-Result OnAbort(const State& s, uint32_t e, uint32_t gen);
-Result OnServerAudio(const State& s, uint32_t e);
+Result OnTtsStop(const State& s, uint64_t e, uint32_t gen);
+Result OnAbort(const State& s, uint64_t e, uint32_t gen);
+Result OnServerAudio(const State& s, uint64_t e);
 // R5 (touch / wake word while speaking). Not speaking: kIgnored. Wrong pair: kStale.
-Result OnTouch(const State& s, uint32_t e);
+Result OnTouch(const State& s, uint64_t e);
 // F1/F2/full queue: stop and mark dead (the shell ends the pair)
-Result StopForDeath(const State& s, uint32_t e);
+Result StopForDeath(const State& s, uint64_t e);
 // ClearForListening: clear the queue only while not speaking (design §2.4)
 bool ShouldClearForListening(const State& s);
 

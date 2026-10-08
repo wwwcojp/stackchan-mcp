@@ -9,7 +9,7 @@ namespace {
 
 using Outs = std::vector<Output>;
 
-Output Out(OutKind k, uint32_t e = 0, uint32_t attempt = 0) {
+Output Out(OutKind k, uint64_t e = 0, uint32_t attempt = 0) {
     Output o{k};
     o.e = e;
     o.attempt = attempt;

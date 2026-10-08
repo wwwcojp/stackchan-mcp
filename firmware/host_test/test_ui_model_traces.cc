@@ -50,6 +50,13 @@ bool Uint(const cJSON* o, const char* k, uint32_t* out) {
     *out = static_cast<uint32_t>(v->valueint);
     return true;
 }
+// E is 64-bit (design §3.1); the traces' epochs are small
+bool Uint(const cJSON* o, const char* k, uint64_t* out) {
+    uint32_t v = 0;
+    if (!Uint(o, k, &v)) return false;
+    *out = v;
+    return true;
+}
 bool Bool(const cJSON* o, const char* k, bool* out) {
     const cJSON* v = cJSON_GetObjectItemCaseSensitive(o, k);
     if (!cJSON_IsBool(v)) return false;

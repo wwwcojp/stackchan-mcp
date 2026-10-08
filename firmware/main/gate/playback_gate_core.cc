@@ -44,7 +44,7 @@ Result Stale(const State& s) { return Make(s, Outcome::kStale, "stale"); }
 
 // The entry guard. Returns true when the call is for a pair this gate does not serve now.
 // e == 0 with no bound pair is the contract's "not bound yet" (handled by each entry).
-bool IsStale(const State& s, uint32_t e) {
+bool IsStale(const State& s, uint64_t e) {
     if (s.dead) return true;
     if (s.bound_e == 0) return e != 0;
     return e != s.bound_e;
@@ -66,7 +66,7 @@ Sent Done(uint32_t gen, bool already) {
 
 }  // namespace
 
-Result Bind(const State& s, uint32_t e) {
+Result Bind(const State& s, uint64_t e) {
     if (s.dead) return Stale(s);
     if (s.bound_e != 0) return Make(s, Outcome::kIgnored, "S4.2");
     if (e == 0 || e <= s.last_ended_e) return Stale(s);
@@ -75,7 +75,7 @@ Result Bind(const State& s, uint32_t e) {
     return Make(b, Outcome::kBound, "S4.2");
 }
 
-Result Unbind(const State& s, uint32_t e) {
+Result Unbind(const State& s, uint64_t e) {
     if (e != s.bound_e) return Stale(s);
     State u = ResetPair(Stop(s));
     if (e != 0) u.last_ended_e = std::max(u.last_ended_e, e);
@@ -83,7 +83,7 @@ Result Unbind(const State& s, uint32_t e) {
     return Make(u, Outcome::kReset, "K2", true);
 }
 
-Result OnTtsStart(const State& s, uint32_t e, uint32_t gen, uint32_t aborted_gen,
+Result OnTtsStart(const State& s, uint64_t e, uint32_t gen, uint32_t aborted_gen,
                   uint32_t dev_abort_seen) {
     if (IsStale(s, e)) return Stale(s);
     if (s.bound_e == 0) return Make(s, Outcome::kRejected, "R2.1");
@@ -115,7 +115,7 @@ Result OnTtsStart(const State& s, uint32_t e, uint32_t gen, uint32_t aborted_gen
     return Make(d, Outcome::kRejected, "R2.6", stopped);
 }
 
-Result OnTtsStop(const State& s, uint32_t e, uint32_t gen) {
+Result OnTtsStop(const State& s, uint64_t e, uint32_t gen) {
     if (IsStale(s, e)) return Stale(s);
     if (gen == s.current_gen && gen > s.aborted_gen) {
         State d = s;
@@ -128,7 +128,7 @@ Result OnTtsStop(const State& s, uint32_t e, uint32_t gen) {
     return Make(s, Outcome::kIgnored, "R3.ignore");
 }
 
-Result OnAbort(const State& s, uint32_t e, uint32_t gen) {
+Result OnAbort(const State& s, uint64_t e, uint32_t gen) {
     if (IsStale(s, e)) return Stale(s);
     if (s.bound_e == 0) return Make(s, Outcome::kIgnored, "R1.unbound");
     if (gen <= s.aborted_gen) {
@@ -148,13 +148,13 @@ Result OnAbort(const State& s, uint32_t e, uint32_t gen) {
     return r;
 }
 
-Result OnServerAudio(const State& s, uint32_t e) {
+Result OnServerAudio(const State& s, uint64_t e) {
     if (IsStale(s, e)) return Stale(s);
     if (s.accepting && s.speaking) return Make(s, Outcome::kQueued, "R4.queue");
     return Make(s, Outcome::kDropped, "R4.drop");
 }
 
-Result OnTouch(const State& s, uint32_t e) {
+Result OnTouch(const State& s, uint64_t e) {
     if (IsStale(s, e)) return Stale(s);
     if (!s.speaking) return Make(s, Outcome::kIgnored, "R5.ignore");
     State d = Stop(s);
@@ -167,7 +167,7 @@ Result OnTouch(const State& s, uint32_t e) {
     return r;
 }
 
-Result StopForDeath(const State& s, uint32_t e) {
+Result StopForDeath(const State& s, uint64_t e) {
     if (s.bound_e == 0 || IsStale(s, e)) return Stale(s);
     State d = Stop(s);
     d.dead = true;
