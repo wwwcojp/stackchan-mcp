@@ -205,3 +205,11 @@ add_executable(rx_route_test test_rx_route.cc ../main/link/rx_route.cc ../main/l
 target_include_directories(rx_route_test PRIVATE ../main/link)
 target_link_libraries(rx_route_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME rx_route_test COMMAND rx_route_test)
+
+# StackChan FW-A2 plan 2B-1: a link's send task (design §4.1, §3.8)
+add_executable(tx_loop_test test_tx_loop.cc ../main/link/tx_loop.cc ../main/link/link_manager.cc
+    ../main/link/link_manager_core.cc ../main/link/wire.cc ../main/net/send_queue.cc ../main/net/send_deadline.cc
+    ../components/78__esp-ml307/src/ws_frame.cc)
+target_include_directories(tx_loop_test PRIVATE ../main/link ../main/net ../components/78__esp-ml307/include)
+target_link_libraries(tx_loop_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME tx_loop_test COMMAND tx_loop_test)

@@ -32,18 +32,20 @@ void PlaybackGate::ApplyLocked(uint64_t e, const State& before, const Result& r,
     if (cleared != nullptr) *cleared = n;
 }
 
-// A violation (R1.2, R2.2, R2.2b): the core stopped and marked the pair dead. Close the queues
-// (keep the control one when the done is in it) and ask the manager to end the pair (once:
-// every later entry of this pair is stale).
+// A violation (R1.2, R2.2, R2.2b): the core stopped and marked the pair dead. Ask the manager to
+// end the pair (once: every later entry of this pair is stale), then close the queues (keep the
+// control one when the done is in it). The end request goes first: the control send task reports
+// the flush only after the queue is closed for it, so that notice can never reach the manager
+// before the end request (Claude review 146 Minor 2).
 void PlaybackGate::EndViolationLocked(uint64_t e, bool flush) {
     stats_.violations++;
+    p_.end_pair(e, link::EndReason::kViolation, flush);
     p_.audio_queue->Close();
     if (flush) {
         p_.ctrl_queue->CloseForFlush();
     } else {
         p_.ctrl_queue->Close();
     }
-    p_.end_pair(e, link::EndReason::kViolation, flush);
 }
 
 void PlaybackGate::StopForDeathLocked(uint64_t e, link::EndReason reason) {

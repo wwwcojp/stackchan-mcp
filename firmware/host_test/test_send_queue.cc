@@ -1,6 +1,8 @@
 // StackChan FW-A2 §4.1: the send queue.
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include <string>
 #include <thread>
 
@@ -137,4 +139,55 @@ TEST(SendQueue, StatsTrackTheSmallestFreeRoom) {
     for (int i = 0; i < 3; i++) q.Push(E, ElemKind::kJson, "j", 0);
     q.Pop(0);
     EXPECT_EQ(q.Stats().min_free_items, 1u);
+}
+
+// Follow-up 3 (Codex review 145 Minor 1): a closed queue never keeps Pop waiting. Empty after a
+// flush, Pop returns at once; a Pop waiting on an empty open queue returns when the queue is
+// closed (for a flush or for good), not at its timeout.
+TEST(SendQueue, PopNeverWaitsOnAClosedQueue) {
+    using namespace std::chrono;
+    SendQueue q(kCtrlLimits);
+    q.Open(7);
+    q.CloseForFlush();
+    auto t0 = steady_clock::now();
+    EXPECT_FALSE(q.Pop(5'000'000).has_value());
+    EXPECT_LT(steady_clock::now() - t0, milliseconds(500));
+
+    for (bool flush : {true, false}) {
+        SendQueue r(kCtrlLimits);
+        r.Open(7);
+        std::thread closer([&] {
+            std::this_thread::sleep_for(milliseconds(100));
+            if (flush) {
+                r.CloseForFlush();
+            } else {
+                r.Close();
+            }
+        });
+        t0 = steady_clock::now();
+        EXPECT_FALSE(r.Pop(5'000'000).has_value()) << flush;
+        EXPECT_LT(steady_clock::now() - t0, milliseconds(2000)) << flush;
+        closer.join();
+    }
+}
+
+// FlushDone: closed for a flush and nothing left (the control send task's kCtrlFlushed). A queue
+// closed for good is drained but not flushed.
+TEST(SendQueue, FlushDoneOnlyAfterAFlush) {
+    SendQueue q(kCtrlLimits);
+    q.Open(7);
+    ASSERT_EQ(q.Push(7, ElemKind::kJson, "done", 0), PushResult::kQueued);
+    q.CloseForFlush();
+    EXPECT_FALSE(q.FlushDone());
+    ASSERT_TRUE(q.Pop(0).has_value());
+    EXPECT_TRUE(q.FlushDone());
+    EXPECT_TRUE(q.Drained());
+
+    SendQueue r(kCtrlLimits);
+    r.Open(7);
+    r.Close();
+    EXPECT_TRUE(r.Drained());
+    EXPECT_FALSE(r.FlushDone());
+    r.Open(8);
+    EXPECT_FALSE(r.FlushDone());
 }

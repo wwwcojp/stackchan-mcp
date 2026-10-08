@@ -74,12 +74,15 @@ public:
     PushResult PushPair(uint64_t e, std::string first, std::string second, int64_t now_us);
 
     // The send task: the next element, waiting up to timeout_us; nullopt on timeout, when
-    // stopping, or when the queue is closed and empty.
+    // stopping, or when the queue is closed (for good or for a flush) and empty: a closed queue
+    // never keeps it waiting (Codex review 145 Minor 1).
     std::optional<Elem> Pop(int64_t timeout_us);
     // Wake Pop (the stop request).
     void Wake();
 
     bool Drained() const;  // closed for flush (or closed) and nothing left
+    bool Flushing() const;   // closed for a flush (the done is being sent)
+    bool FlushDone() const;  // closed for a flush and nothing left (kCtrlFlushed)
     QueueStats Stats() const;
     uint64_t e() const;
 

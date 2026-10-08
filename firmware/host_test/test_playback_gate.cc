@@ -51,6 +51,7 @@ struct Rig {
     std::vector<End> ends;
     std::vector<Notice> changed, link_ups;
     std::unique_ptr<g::PlaybackGate> gate;
+    std::function<void()> on_end;  // runs inside end_pair, before it is recorded
     Rig() {
         g::GatePorts p;
         p.audio = &audio;
@@ -59,7 +60,10 @@ struct Rig {
         p.now_us = [] { return int64_t{0}; };
         p.post_gate_changed = [this](uint64_t e, bool spk, uint32_t rev) { changed.push_back({e, spk, rev}); };
         p.post_link_up = [this](uint64_t e, bool spk, uint32_t rev) { link_ups.push_back({e, spk, rev}); };
-        p.end_pair = [this](uint64_t e, EndReason r, bool flush) { ends.push_back({e, r, flush}); };
+        p.end_pair = [this](uint64_t e, EndReason r, bool flush) {
+            if (on_end) on_end();
+            ends.push_back({e, r, flush});
+        };
         gate = std::make_unique<g::PlaybackGate>(p);
     }
     void Bind(uint64_t e) {
@@ -448,4 +452,30 @@ TEST(PlaybackGateShell, AnAbortOfAnotherOrNoSessionDoesNothing) {  // Codex revi
     EXPECT_TRUE(rig.gate->Snapshot().speaking);
     EXPECT_TRUE(Drain(rig.ctrl_q).empty());  // no done either
     EXPECT_EQ(rig.gate->Stats().rejected_session, 2u);
+}
+
+// Follow-up 2 (Claude review 146 Minor 2): the end request is posted before the control queue is
+// closed for the flush, so the control send task can never report the flush (kCtrlFlushed) to
+// the manager ahead of the end request (it would be dropped as stale and the pair would wait 2 s).
+TEST(PlaybackGateShell, TheFlushIsNeverSeenBeforeTheEndRequest) {
+    Rig rig;
+    rig.Bind(7);
+    rig.gate->OnTtsStart(7, {3, 0, 0});
+    bool flush_seen_at_end = true;
+    rig.on_end = [&] {
+        // what the control send task could do right now: take everything, look for the flush
+        while (rig.ctrl_q.Pop(0)) {
+        }
+        flush_seen_at_end = rig.ctrl_q.FlushDone();
+    };
+    w::AbortRequest req;
+    req.gen = 2;  // R1.2
+    req.req_id = "q";
+    req.session_id = "sid";
+    EXPECT_EQ(rig.gate->OnAbort(7, req), g::Outcome::kEnded);
+    ASSERT_EQ(rig.ends.size(), 1u);
+    EXPECT_TRUE(rig.ends[0].flush);
+    EXPECT_FALSE(flush_seen_at_end);
+    EXPECT_TRUE(rig.ctrl_q.FlushDone());  // after the end request: closed for the flush, empty
+    EXPECT_EQ(rig.ctrl_q.Push(7, n::ElemKind::kJson, "late", 0), n::PushResult::kClosed);
 }

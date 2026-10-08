@@ -117,7 +117,7 @@ PushResult SendQueue::PushPair(uint64_t e, std::string first, std::string second
 std::optional<Elem> SendQueue::Pop(int64_t timeout_us) {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait_for(lock, std::chrono::microseconds(timeout_us),
-                 [this] { return woken_ || !items_.empty() || (!open_ && !flushing_); });
+                 [this] { return woken_ || !items_.empty() || !open_; });
     if (woken_) {
         woken_ = false;
         return std::nullopt;
@@ -138,6 +138,16 @@ void SendQueue::Wake() {
 bool SendQueue::Drained() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return !open_ && items_.empty();
+}
+
+bool SendQueue::Flushing() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return flushing_;
+}
+
+bool SendQueue::FlushDone() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return flushing_ && items_.empty();
 }
 
 QueueStats SendQueue::Stats() const {
