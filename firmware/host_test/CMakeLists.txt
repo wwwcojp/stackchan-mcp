@@ -187,3 +187,9 @@ add_executable(gateway_target_test test_gateway_target.cc ../main/link/gateway_t
 target_include_directories(gateway_target_test PRIVATE ../main/link)
 target_link_libraries(gateway_target_test PRIVATE GTest::gtest_main)
 add_test(NAME gateway_target_test COMMAND gateway_target_test)
+
+# StackChan FW-A2 plan 2B-1: the WebSocket frame parts of the vendored esp-ml307 (design §4.2 change 6)
+add_executable(ws_frame_test test_ws_frame.cc ../components/78__esp-ml307/src/ws_frame.cc)
+target_include_directories(ws_frame_test PRIVATE ../components/78__esp-ml307/include)
+target_link_libraries(ws_frame_test PRIVATE GTest::gtest_main)
+add_test(NAME ws_frame_test COMMAND ws_frame_test)

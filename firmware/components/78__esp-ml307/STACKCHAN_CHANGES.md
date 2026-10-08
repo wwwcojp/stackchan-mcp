@@ -9,4 +9,13 @@ manager resolves it to this local copy (`dependencies.lock`: `type: local`).
 
 ## Changes
 
-None yet. FW-A2 plan 2B adds design §4.2 changes 1-7 here, one entry each.
+FW-A2 plan 2B-1 adds design §4.2 changes 1-7 here, one entry each. The upstream `WebSocket`
+class and the blocking `EspTcp::Connect()` are left as they are (the FW-A protocol and `HttpClient`
+use them); the changes are new entry points.
+
+1. **WebSocket frame parts (change 6, part):** `include/ws_frame.h`, `src/ws_frame.cc`. Pure
+   (no FreeRTOS, no sockets; host-tested in `firmware/host_test/test_ws_frame.cc`): a decoder of
+   the server's frames in any split (fragments joined, control frames passed out as they come,
+   broken frames and lengths over a limit are errors that stay), a masked client-frame encoder and
+   the opening handshake (request, response). Nothing answers a ping here: the link does it
+   through its send queue.
