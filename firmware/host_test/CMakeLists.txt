@@ -228,3 +228,10 @@ add_executable(connect_plan_test test_connect_plan.cc ../main/link/connect_plan.
 target_include_directories(connect_plan_test PRIVATE ../main/link ../main/net ../components/78__esp-ml307/include)
 target_link_libraries(connect_plan_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME connect_plan_test COMMAND connect_plan_test)
+
+# StackChan FW-A2 plan 2B-2a: the AudioService's playback queues and book (plan 2A handoff 1-3)
+add_executable(audio_pipeline_test test_audio_pipeline.cc ../main/audio/audio_pipeline.cc
+    ../main/audio/playback_book.cc ../main/audio/audio_origin.cc)
+target_include_directories(audio_pipeline_test PRIVATE ../main/audio ../main/gate ../main/net ../main/link)
+target_link_libraries(audio_pipeline_test PRIVATE GTest::gtest_main playback_gate_core)
+add_test(NAME audio_pipeline_test COMMAND audio_pipeline_test)
