@@ -160,3 +160,12 @@ add_executable(playback_book_test test_playback_book.cc ../main/audio/playback_b
 target_include_directories(playback_book_test PRIVATE ../main/audio)
 target_link_libraries(playback_book_test PRIVATE GTest::gtest_main playback_gate_core)
 add_test(NAME playback_book_test COMMAND playback_book_test)
+
+# StackChan FW-A2 plan 2A: the playback gate shell (the vectors through it, queue failures, R5)
+add_executable(playback_gate_test test_playback_gate.cc ../main/gate/playback_gate.cc
+    ../main/net/send_queue.cc ../main/link/wire.cc)
+target_compile_definitions(playback_gate_test
+    PRIVATE CONTRACT_VECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/contract_vectors")
+target_include_directories(playback_gate_test PRIVATE ../main/gate ../main/net ../main/link)
+target_link_libraries(playback_gate_test PRIVATE GTest::gtest_main playback_gate_core cjson)
+add_test(NAME playback_gate_test COMMAND playback_gate_test)
