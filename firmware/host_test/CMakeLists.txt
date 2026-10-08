@@ -181,3 +181,9 @@ add_executable(ui_controller_test test_ui_controller.cc ../main/ui/ui_controller
 target_include_directories(ui_controller_test PRIVATE ../main ../main/ui ../main/gate ../main/net ../main/link)
 target_link_libraries(ui_controller_test PRIVATE GTest::gtest_main ui_controller_core)
 add_test(NAME ui_controller_test COMMAND ui_controller_test)
+
+# StackChan FW-A2 plan 2A: the gateway candidates and the ws://IPv4 check (design §3.6)
+add_executable(gateway_target_test test_gateway_target.cc ../main/link/gateway_target.cc)
+target_include_directories(gateway_target_test PRIVATE ../main/link)
+target_link_libraries(gateway_target_test PRIVATE GTest::gtest_main)
+add_test(NAME gateway_target_test COMMAND gateway_target_test)
