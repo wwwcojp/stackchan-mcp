@@ -199,3 +199,9 @@ add_executable(sock_slice_test test_sock_slice.cc ../components/78__esp-ml307/sr
 target_include_directories(sock_slice_test PRIVATE ../components/78__esp-ml307/include)
 target_link_libraries(sock_slice_test PRIVATE GTest::gtest_main)
 add_test(NAME sock_slice_test COMMAND sock_slice_test)
+
+# StackChan FW-A2 plan 2B-1: what the receive tasks decide (audio frames, the hello reply, routing)
+add_executable(rx_route_test test_rx_route.cc ../main/link/rx_route.cc ../main/link/wire.cc)
+target_include_directories(rx_route_test PRIVATE ../main/link)
+target_link_libraries(rx_route_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME rx_route_test COMMAND rx_route_test)
