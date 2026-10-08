@@ -154,3 +154,9 @@ add_executable(send_queue_test test_send_queue.cc ../main/net/send_queue.cc)
 target_include_directories(send_queue_test PRIVATE ../main/net)
 target_link_libraries(send_queue_test PRIVATE GTest::gtest_main)
 add_test(NAME send_queue_test COMMAND send_queue_test)
+
+# StackChan FW-A2 plan 2A: the AudioService's bookkeeping and the split-pipeline enumeration
+add_executable(playback_book_test test_playback_book.cc ../main/audio/playback_book.cc ../main/audio/audio_origin.cc)
+target_include_directories(playback_book_test PRIVATE ../main/audio)
+target_link_libraries(playback_book_test PRIVATE GTest::gtest_main playback_gate_core)
+add_test(NAME playback_book_test COMMAND playback_book_test)
