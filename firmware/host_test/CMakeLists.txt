@@ -142,3 +142,9 @@ add_executable(send_deadline_test test_send_deadline.cc ../main/net/send_deadlin
 target_include_directories(send_deadline_test PRIVATE ../main/net)
 target_link_libraries(send_deadline_test PRIVATE GTest::gtest_main)
 add_test(NAME send_deadline_test COMMAND send_deadline_test)
+
+# StackChan FW-A2 plan 2A: the contract's JSON messages
+add_executable(wire_test test_wire.cc ../main/link/wire.cc)
+target_include_directories(wire_test PRIVATE ../main/link)
+target_link_libraries(wire_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME wire_test COMMAND wire_test)
