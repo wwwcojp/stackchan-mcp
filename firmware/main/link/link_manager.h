@@ -40,7 +40,9 @@ private:
     size_t min_free_ = kNoticeQueueLen;
 };
 
-// What the outputs do (plan 2B). Called from the manager task only, never under its own lock.
+// What the outputs do (plan 2B). Called from the manager task only, never under its own lock;
+// Restart also from a connect worker whose link's task cannot be seen to stop (it touches nothing
+// of the manager's state).
 class ManagerPorts {
 public:
     virtual ~ManagerPorts() = default;

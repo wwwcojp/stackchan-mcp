@@ -36,6 +36,9 @@ std::optional<DeviceState> AudioTestingToggleTarget(DeviceState s);
 
 TouchReply ToTouchReply(gate::TouchOutcome o);  // plan 1 handoff 13
 wire::ListenMode ToWireMode(Mode m);
+// The gateway's listen as an event (the audio receive task posts it): start carries the mode and
+// the profile, stop only the pair.
+Event GwListenEvent(uint64_t e, const wire::GwListen& listen);
 
 struct UiConfig {
     // CONFIG_WAKE_WORD_DETECTION_IN_LISTENING && IsAfeWakeWord() (Step's wake_in_listening)

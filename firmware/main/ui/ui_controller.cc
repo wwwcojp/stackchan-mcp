@@ -46,6 +46,19 @@ wire::ListenMode ToWireMode(Mode m) {
     return wire::ListenMode::kManualStop;
 }
 
+Event GwListenEvent(uint64_t e, const wire::GwListen& listen) {
+    Event ev;
+    ev.kind = listen.start ? EvKind::kGwListenStart : EvKind::kGwListenStop;
+    ev.e = e;
+    switch (listen.mode) {
+        case wire::ListenMode::kAutoStop: ev.mode = Mode::kAutoStop; break;
+        case wire::ListenMode::kRealtime: ev.mode = Mode::kRealtime; break;
+        case wire::ListenMode::kManualStop: ev.mode = Mode::kManualStop; break;
+    }
+    ev.profile = listen.profile == wire::ListenProfile::kRaw ? Profile::kRaw : Profile::kVoice;
+    return ev;
+}
+
 namespace {
 
 DeviceState ToDeviceState(Disp d) {

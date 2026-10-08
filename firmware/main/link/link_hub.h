@@ -1,0 +1,110 @@
+// StackChan FW-A2 plan 2B-1 (design §3, §3.8): the link manager's ports on the ESP. The hub owns
+// the manager task (link_mgr, priority 6), draws each pair's E (MessageStamp: boot_count * 65536 +
+// conn_index, design §3.1), starts one connect worker per link and attempt (link_conn, priority
+// 3), keeps the links of the current attempt and runs every output of the manager: hellos and
+// ready into the send queues, the gate's bind / unbind / stop / LinkUp, LinkDown to UiController,
+// the stop request, the destruction after every task exited, the restart. Plan 2B-1 builds it but
+// nothing creates it yet (plan 2B-2 does, with the AudioService and the app).
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+
+#include "connect_plan.h"
+#include "link_esp.h"
+#include "link_manager.h"
+#include "message_stamp.h"
+#include "playback_gate.h"
+#include "rx_link.h"
+#include "send_queue.h"
+#include "ui_controller.h"
+
+namespace stackchan::link {
+
+struct HubDeps {
+    NoticeQueue* notices = nullptr;
+    net::SendQueue* audio_queue = nullptr;
+    net::SendQueue* ctrl_queue = nullptr;
+    gate::PlaybackGate* gate = nullptr;
+    ui::UiController* ui = nullptr;
+    uint32_t boot_count = 0;
+    // The receive side's app ports (plan 2B-2): hello_reply, server_audio, app_json, stat. The hub
+    // fills the rest (gate, UiController, the notices).
+    RxPorts app;
+    // NVS and Kconfig for one attempt, read on the worker
+    std::function<ConnectInputs()> read_inputs;
+    bool server_aec = false;
+    int frame_duration_ms = 60;
+};
+
+class LinkHub : public ManagerPorts {
+public:
+    explicit LinkHub(HubDeps deps);
+    // Start the manager task. False when it could not be created.
+    bool Start();
+    // Reboot / OTA (design §3.5): no reconnect; the pair ends.
+    void RequestShutdown();
+
+    // ManagerPorts (the manager task only)
+    int64_t NowUs() override;
+    int64_t CtrlLastRxUs() override;
+    bool NextConnectionWraps() override;
+    void ConnectAudio(uint32_t attempt) override;
+    void SendAudioHello(uint32_t attempt, uint64_t e) override;
+    void ConnectCtrl(uint32_t attempt, uint64_t e) override;
+    void SendCtrlHello(uint64_t e) override;
+    void BindGate(uint64_t e) override;
+    void SendReady(uint64_t e) override;
+    void PostLinkUp(uint64_t e) override;
+    void StopForDeath(uint64_t e, EndReason reason) override;
+    void UnbindGate(uint64_t e) override;
+    void CloseQueues(uint64_t e, bool keep_ctrl) override;
+    void PostLinkDown(uint64_t e) override;
+    void RequestStop(uint64_t e) override;
+    void Destroy(uint64_t e) override;
+    void Restart(uint64_t e, const char* why) override;
+
+private:
+    struct Worker {
+        LinkHub* hub;
+        LinkSide side;
+        uint32_t attempt;
+        uint64_t e;
+        std::string url;         // the control link: the audio link's URL
+        std::string session_id;  // the control link: the audio hello reply's session
+        ConnectInputs inputs;    // the control link: what the audio worker read (one read per
+                                 // attempt; Claude review 149 Minor 4)
+    };
+    // What the worker posts after its C++ objects are gone (trivially destructible)
+    struct WorkerOutcome {
+        NoticeQueue* notices;
+        Input result;
+        Input end;
+        Input exited;
+        Link* link;  // the adopted link, or null
+    };
+    static WorkerOutcome RunWorker(Worker* w);
+    static void WorkerMain(void* arg);
+    static void ManagerMain(void* arg);
+    void StartWorker(Worker* w);
+    RxPorts RxPortsFor();
+    // The worker hands over a started link. Under the leaf mutex; a stop requested for the
+    // attempt meanwhile reaches the link at once.
+    void Adopt(LinkSide side, uint32_t attempt, std::unique_ptr<Link> link);
+    void Push(net::SendQueue* q, uint64_t e, const std::string& json, const char* what);
+
+    HubDeps d_;
+    LinkManager manager_;
+    MessageStamp stamp_;
+    bool connected_once_ = false;
+    std::atomic<uint32_t> stop_attempt_{0};
+    std::mutex mutex_;  // a leaf: the links below
+    std::unique_ptr<Link> audio_, ctrl_;
+    uint32_t links_attempt_ = 0;
+};
+
+}  // namespace stackchan::link

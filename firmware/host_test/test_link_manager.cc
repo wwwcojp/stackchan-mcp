@@ -23,7 +23,12 @@ struct FakePorts : ManagerPorts {
     std::vector<std::string> log;
     void Add(const std::string& s) { log.push_back(s); }
     static std::string N(uint64_t v) { return std::to_string(v); }
-    int64_t NowUs() override { return now; }
+    int64_t step = 0;  // the clock moves by this much at every read (0: it stands still)
+    int64_t NowUs() override {
+        const int64_t t = now;
+        now += step;
+        return t;
+    }
     int64_t CtrlLastRxUs() override { return ctrl_rx; }
     bool NextConnectionWraps() override { return wraps; }
     void ConnectAudio(uint32_t a) override { Add("connect_audio " + N(a)); }
@@ -282,4 +287,20 @@ TEST(LinkManagerShell, NoticesAreStampedWithTheShellsClock) {
     EXPECT_EQ(std::count_if(f.ports.log.begin(), f.ports.log.end(),
                             [](const std::string& s) { return s.rfind("restart", 0) == 0; }),
               0);
+}
+
+// Follow-up 12 (Codex review 147 Minor 1): the time stamped on a notice is read after Take()
+// returned, not before it waited. Here the take "takes" 4.9 s: the hello deadline counts from the
+// later reading, so a tick 6 s after the first reading does not end the pair.
+TEST(LinkManagerShell, ANoticeIsStampedWhenItIsTakenNotBefore) {
+    Rig r;
+    r.ports.now = 100 * S;
+    r.m.RunOnce();  // tick: connect (the next tick is due at 100.1 s)
+    r.ports.now = 100 * S + 50'000;
+    r.ports.step = 4'900'000;  // read before the take: 100.05 s, after it: 104.95 s
+    r.Feed(Result(kAudioRx, true));
+    r.ports.step = 0;
+    r.ports.now = 106 * S;  // past 100.05 + 5 s, before 104.95 + 5 s
+    r.m.RunOnce();
+    EXPECT_EQ(r.ports.log, (std::vector<std::string>{"connect_audio 1", "audio_hello 1 " + FakePorts::N(E)}));
 }

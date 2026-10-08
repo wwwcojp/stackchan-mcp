@@ -303,3 +303,28 @@ TEST(UiShell, TheListeningDetectorSettingReachesStep) {
     EXPECT_TRUE(r.Logged("detect on"));
     EXPECT_FALSE(r.Logged("detect off"));
 }
+
+// The gateway's listen as a UiController event (the audio receive task posts it, design §2.4)
+TEST(UiControllerShell, TheGatewaysListenAsAnEvent) {
+    constexpr uint64_t kE = 65536ull * 65536 + 9;
+    w::GwListen l;
+    l.start = true;
+    l.mode = w::ListenMode::kAutoStop;
+    l.profile = w::ListenProfile::kRaw;
+    Event ev = GwListenEvent(kE, l);
+    EXPECT_EQ(ev.kind, EvKind::kGwListenStart);
+    EXPECT_EQ(ev.e, kE);
+    EXPECT_EQ(ev.mode, Mode::kAutoStop);
+    EXPECT_EQ(ev.profile, Profile::kRaw);
+    l.mode = w::ListenMode::kRealtime;
+    l.profile = w::ListenProfile::kVoice;
+    ev = GwListenEvent(kE, l);
+    EXPECT_EQ(ev.mode, Mode::kRealtime);
+    EXPECT_EQ(ev.profile, Profile::kVoice);
+    l.mode = w::ListenMode::kManualStop;
+    EXPECT_EQ(GwListenEvent(kE, l).mode, Mode::kManualStop);
+    l.start = false;
+    ev = GwListenEvent(kE, l);
+    EXPECT_EQ(ev.kind, EvKind::kGwListenStop);
+    EXPECT_EQ(ev.e, kE);
+}
