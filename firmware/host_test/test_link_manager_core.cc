@@ -215,6 +215,7 @@ TEST(LinkManagerCore, DestroyAfterAllExitsThenBackOffAndDoubleUpTo15s) {
         const int64_t t = b.retry_at_us;
         b = Step(b, Tick(t)).state;
         b = Step(b, Connected(b.attempt, kAudioRx, false, E1, t)).state;
+        b = Step(b, Exited(b.attempt, kAudioWorker, t)).state;  // the worker exits after its result
     }
     EXPECT_EQ(b.backoff_ms, kBackoffMaxMs);
 }
@@ -239,6 +240,55 @@ TEST(LinkManagerCore, ConnectFailureGoesStraightToWaiting) {
     EXPECT_TRUE(r.out.empty());
     EXPECT_EQ(r.state.stage, Stage::kWaiting);
     EXPECT_EQ(r.state.retry_at_us, 2 * S);
+}
+
+// Design §3.8 (v10, Codex reviews 141 Minor 2 / 142): the next attempt starts only after every
+// task the previous attempt started exited. A failed audio connect leaves its worker (it posts
+// the result before it exits), so the queue never holds notices of two attempts.
+TEST(LinkManagerCore, AFailedConnectWaitsForItsWorkerBeforeTheNextAttempt) {
+    State s = Step(State{}, Tick(0)).state;
+    s = Step(s, Connected(1, kAudioRx, false, E1, S)).state;
+    EXPECT_EQ(s.pending_exits, uint32_t{kAudioWorker});
+    EXPECT_TRUE(Step(s, Tick(2 * S)).out.empty());  // retry time, but the worker still runs
+    const StepResult exited = Step(s, Exited(1, kAudioWorker, 2 * S + 1));
+    EXPECT_TRUE(exited.out.empty());
+    EXPECT_EQ(exited.state.stale_inputs, s.stale_inputs);  // the worker's exit is not stale now
+    EXPECT_EQ(exited.state.pending_exits, 0u);
+    const StepResult next = Step(exited.state, Tick(2 * S + 2));
+    EXPECT_EQ(next.out, std::vector<Output>({O(OutKind::kConnectAudio, 0, 2)}));
+    EXPECT_EQ(next.state.exited, 0u);  // the old worker's exit does not cover the new worker
+    EXPECT_EQ(next.state.started, uint32_t{kAudioWorker});
+}
+
+// Codex review 143 Minor 1: a Shutdown while the failed connect's worker still runs keeps
+// waiting for it (or restarts after 3 s); kStopped only after its exit.
+TEST(LinkManagerCore, AShutdownWhileTheFailedConnectsWorkerRunsStillWaitsForIt) {
+    State s = Step(State{}, Tick(0)).state;
+    s = Step(s, Connected(1, kAudioRx, false, E1, S)).state;
+    s = Step(s, WithE(InKind::kShutdown, 0, S)).state;
+    EXPECT_EQ(s.stage, Stage::kWaiting);
+    EXPECT_EQ(s.pending_exits, uint32_t{kAudioWorker});
+    EXPECT_EQ(Step(s, Tick(4 * S)).out, std::vector<Output>({O(OutKind::kRestart, 0)}));
+    const State done = Step(s, Exited(1, kAudioWorker, 2 * S)).state;
+    EXPECT_EQ(done.stage, Stage::kStopped);
+    EXPECT_EQ(done.stale_inputs, s.stale_inputs);
+    EXPECT_TRUE(Step(done, Tick(100 * S)).out.empty());  // no reconnect
+}
+
+TEST(LinkManagerCore, AFailedConnectsWorkerThatNeverExitsRestartsAfterThreeSeconds) {
+    State s = Step(State{}, Tick(0)).state;
+    s = Step(s, Connected(1, kAudioRx, false, E1, S)).state;
+    EXPECT_TRUE(Step(s, Tick(4 * S - 1)).out.empty());
+    EXPECT_EQ(Step(s, Tick(4 * S)).out, std::vector<Output>({O(OutKind::kRestart, 0)}));
+    // an exit of another attempt does not count
+    const State other = Step(s, Exited(2, kAudioWorker, 2 * S)).state;
+    EXPECT_EQ(other.pending_exits, uint32_t{kAudioWorker});
+    EXPECT_EQ(other.stale_inputs, s.stale_inputs + 1);
+    // nor does an exit of a task the attempt did not start
+    const State not_started = Step(s, Exited(1, kAudioRx, 2 * S)).state;
+    EXPECT_EQ(not_started.pending_exits, uint32_t{kAudioWorker});
+    EXPECT_EQ(not_started.exited, 0u);
+    EXPECT_EQ(not_started.stale_inputs, s.stale_inputs + 1);
 }
 
 TEST(LinkManagerCore, NoControlOfferedKeepsTheAudioLinkWithoutS6) {
@@ -357,16 +407,17 @@ TEST(LinkManagerCore, AnAttemptEndedBeforeItsEpochTakesTheEpochOfTheLateLink) {
 // - the receive/send tasks of a link may exit at any time, a task that exits by itself posts
 //   EndRequest (in either order, up to twice), the gate may post a violation EndRequest;
 // - deadlines, F1 and Shutdown may come at any point; the server may offer no control link or
-//   reply with another epoch; a failed attempt's worker may exit after the next attempt started.
+//   reply with another epoch.
 // Properties: Destroy only when no task of the attempt runs (and under the link's epoch); Restart
 // only when one runs; while ending, the core waits only for tasks that run and some task runs;
-// leaving an attempt without Destroy only when it has no link task running.
+// leaving an attempt without Destroy only when it has no link task running; a new attempt starts
+// only when no task of the previous one runs (design §3.8, v10: the worker of a failed connect
+// is waited for, so the manager's queue never holds two attempts' notices).
 TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
     struct Shell {
         State s;
         int64_t now = 0;
         uint32_t alive = 0;          // tasks of the current attempt that run
-        uint32_t old_worker = 0;     // attempt of a failed attempt's worker that still runs
         bool audio_links = false, audio_result = false, hello_replied = false;
         bool ctrl_links = false, ctrl_result = false, ctrl_hello_replied = false, ready_sent = false;
         bool hello_sent = false, ctrl_hello_sent = false, ready_queued = false, flush_pending = false;
@@ -380,7 +431,7 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
         k << static_cast<int>(s.stage) << ',' << s.attempt << ',' << s.e << ',' << s.deadline_us << ','
           << s.retry_at_us << ',' << s.backoff_ms << ',' << s.started << ',' << s.exited << ','
           << s.pending_exits << ',' << s.flushing << s.flush_ctrl << s.shutdown << s.ctrl_link_up << ','
-          << w.now << ',' << w.alive << ',' << w.old_worker << ',' << w.audio_links << w.audio_result
+          << w.now << ',' << w.alive << ',' << w.audio_links << w.audio_result
           << w.hello_replied << w.ctrl_links << w.ctrl_result << w.ctrl_hello_replied << w.ready_sent
           << w.hello_sent << w.ctrl_hello_sent << w.ready_queued << w.flush_pending << w.f1 << w.shut
           << w.done << w.ends << w.audio_made << w.ctrl_made;
@@ -417,7 +468,6 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
         if ((w.alive & kAudioWorker) && w.audio_result) {
             add(Exited(a, kAudioWorker, w.now), [](Shell& n) { n.alive &= ~kAudioWorker; });
         }
-        if (w.old_worker != 0) add(Exited(w.old_worker, kAudioWorker, w.now), [](Shell& n) { n.old_worker = 0; });
         // the control connect worker
         if ((w.alive & kCtrlWorker) && !w.ctrl_result) {
             if (!w.ctrl_links) {
@@ -483,8 +533,7 @@ TEST(LinkManagerCore, EveryOrderOfTaskNoticesDestroysOnlyWhatStopped) {
                 for (const Output& o : r.out) {
                     switch (o.kind) {
                         case OutKind::kConnectAudio:
-                            ASSERT_EQ(n.alive & ~kAudioWorker, 0u) << "a new attempt while link tasks run";
-                            if (n.alive & kAudioWorker) n.old_worker = n.s.attempt - 1;
+                            ASSERT_EQ(n.alive, 0u) << "a new attempt while a task of the previous one runs";
                             n.alive = kAudioWorker;
                             n.audio_links = n.audio_result = n.hello_replied = n.ctrl_links = n.ctrl_result = false;
                             n.ctrl_hello_replied = n.ready_sent = n.hello_sent = n.ctrl_hello_sent = false;

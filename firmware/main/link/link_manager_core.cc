@@ -22,14 +22,20 @@ bool Building(Stage st) {
            st == Stage::kBound;
 }
 
+// Leave the attempt. A failed audio connect's worker posts the result before it exits: keep its
+// bit and wait for it (3 s) before the next attempt, so no two attempts' tasks run at once and
+// the manager's queue never holds two attempts' notices (design §3.8, v10). Every other way here
+// has confirmed all exits (Destroy).
 State ToWaiting(State s, int64_t now) {
     s.stage = s.shutdown ? Stage::kStopped : Stage::kWaiting;
     s.retry_at_us = now + static_cast<int64_t>(s.backoff_ms) * 1000;
     s.backoff_ms = std::min(s.backoff_ms * 2, kBackoffMaxMs);
-    s.deadline_us = 0;
-    s.started = 0;
-    s.exited = 0;
-    s.pending_exits = 0;
+    s.pending_exits = s.started & ~s.exited;
+    s.deadline_us = s.pending_exits != 0 ? now + kExitWaitUs : 0;
+    if (s.pending_exits == 0) {
+        s.started = 0;
+        s.exited = 0;
+    }
     s.flushing = false;
     s.flush_ctrl = false;
     s.ctrl_link_up = false;
@@ -89,6 +95,10 @@ StepResult Step(const State& s0, const Input& in) {
             const int64_t now = in.now_us;
             switch (s.stage) {
                 case Stage::kWaiting:
+                    if (s.pending_exits != 0) {  // the previous attempt's worker still runs
+                        if (now >= s.deadline_us) out->push_back(Out(OutKind::kRestart, s.e));
+                        break;
+                    }
                     if (!s.shutdown && now >= s.retry_at_us) {
                         s.attempt++;
                         s.stage = Stage::kAudioConnect;
@@ -207,7 +217,20 @@ StepResult Step(const State& s0, const Input& in) {
         case InKind::kTaskExited: {
             // by the attempt: an attempt may end before it knows its epoch. Remembered in any
             // stage and order (before the EndRequest, before the late connect result).
-            if (in.attempt != s.attempt || !(Building(s.stage) || s.stage == Stage::kEnding)) return Stale(s);
+            if (in.attempt != s.attempt) return Stale(s);
+            if (s.stage == Stage::kWaiting) {  // the failed connect's worker (ToWaiting)
+                if ((s.pending_exits & in.which) == 0) return Stale(s);
+                s.exited |= in.which;
+                s.pending_exits = s.started & ~s.exited;
+                if (s.pending_exits == 0) {
+                    s.started = 0;
+                    s.exited = 0;
+                    s.deadline_us = 0;
+                    if (s.shutdown) s.stage = Stage::kStopped;
+                }
+                return r;
+            }
+            if (!(Building(s.stage) || s.stage == Stage::kEnding)) return Stale(s);
             s.exited |= in.which;
             if (s.stage != Stage::kEnding) return r;  // the EndRequest follows
             s.pending_exits = s.started & ~s.exited;
@@ -222,9 +245,9 @@ StepResult Step(const State& s0, const Input& in) {
             s.shutdown = true;
             if (Building(s.stage)) {
                 s = EndPair(s, EndReason::kShutdown, false, in.now_us, out);
-            } else if (s.stage == Stage::kWaiting) {
+            } else if (s.stage == Stage::kWaiting && s.pending_exits == 0) {
                 s.stage = Stage::kStopped;
-            }
+            }  // a failed connect's worker still runs: kStopped once it exits (or restart)
             return r;
         }
     }
