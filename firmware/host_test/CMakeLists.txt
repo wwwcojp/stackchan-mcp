@@ -175,3 +175,9 @@ add_executable(link_manager_test test_link_manager.cc ../main/link/link_manager.
 target_include_directories(link_manager_test PRIVATE ../main/link)
 target_link_libraries(link_manager_test PRIVATE GTest::gtest_main)
 add_test(NAME link_manager_test COMMAND link_manager_test)
+
+# StackChan FW-A2 plan 2A: the UiController shell (fake ports)
+add_executable(ui_controller_test test_ui_controller.cc ../main/ui/ui_controller.cc)
+target_include_directories(ui_controller_test PRIVATE ../main ../main/ui ../main/gate ../main/net ../main/link)
+target_link_libraries(ui_controller_test PRIVATE GTest::gtest_main ui_controller_core)
+add_test(NAME ui_controller_test COMMAND ui_controller_test)
