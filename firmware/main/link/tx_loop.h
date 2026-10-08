@@ -39,6 +39,7 @@ struct TxStats {
     uint32_t f2 = 0;          // deadlines missed
     uint32_t errors = 0;      // send errors (the peer went away)
     uint32_t bad_json = 0;    // a queued JSON that did not parse (dropped)
+    uint32_t stale = 0;       // left in the queue by an earlier pair (dropped, not sent)
 };
 
 // Queue a JSON that must go out in order (a hello, the ready). A full queue ends the pair: the
@@ -50,7 +51,10 @@ net::PushResult QueueJsonOrEnd(net::SendQueue& q, uint64_t e, std::string json, 
 
 class TxLoop {
 public:
-    TxLoop(LinkSide side, net::SendQueue* queue, LinkPhase* phase, TxPorts ports);
+    // e: the link's pair E. What another E left in the queue (an earlier pair's control queue
+    // stays closed for its flush until this pair opens it, and this task starts before that)
+    // is not this link's: it is neither sent nor reported (reviews 151/152 Important 1).
+    TxLoop(LinkSide side, uint64_t e, net::SendQueue* queue, LinkPhase* phase, TxPorts ports);
     // One turn: wait up to 200 ms for an element and send it. False: leave the task (the stop
     // request, a failed send, a missed deadline). A failure ends the pair once: the gate stops the
     // sound (F2) and the link's phase decides whether this task posts the end request (after the
@@ -63,6 +67,7 @@ private:
     void PostFlushedOnce();
 
     const LinkSide side_;
+    const uint64_t e_;
     net::SendQueue* queue_;
     LinkPhase* phase_;
     TxPorts p_;

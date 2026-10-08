@@ -95,7 +95,7 @@ TEST(TxLoop, StampsJsonInSendOrder) {
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"hello"})", f.now), net::PushResult::kQueued);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"listen","state":"start"})", f.now), net::PushResult::kQueued);
     ASSERT_EQ(q.Push(E, net::ElemKind::kMic, "abc", f.now), net::PushResult::kQueued);
-    TxLoop tx(LinkSide::kAudio, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kAudio, E, &q, &phase, f.Ports());
     for (int i = 0; i < 3; i++) EXPECT_TRUE(tx.RunOnce());
     const auto frames = f.Frames();
     ASSERT_EQ(frames.size(), 3u);
@@ -117,7 +117,7 @@ TEST(TxLoop, ReadyIsReportedAfterItIsSent) {
     q.Open(E);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, Text(wire::BuildCtrlHello(E)), f.now), net::PushResult::kQueued);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, Text(wire::BuildReady(E)), f.now), net::PushResult::kQueued);
-    TxLoop tx(LinkSide::kCtrl, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kCtrl, E, &q, &phase, f.Ports());
     EXPECT_TRUE(tx.RunOnce());
     EXPECT_TRUE(f.posted.empty());  // the hello is not the ready
     EXPECT_TRUE(tx.RunOnce());
@@ -141,7 +141,7 @@ TEST(TxLoop, AMissedDeadlineStopsTheSoundAndEndsThePairOnce) {
     net::SendQueue q(net::kAudioLimits);
     q.Open(E);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"listen"})", f.now), net::PushResult::kQueued);
-    TxLoop tx(LinkSide::kAudio, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kAudio, E, &q, &phase, f.Ports());
     EXPECT_FALSE(tx.RunOnce());
     ASSERT_EQ(f.deaths.size(), 1u);
     EXPECT_EQ(f.deaths[0], std::make_pair(E, EndReason::kF2));
@@ -161,7 +161,7 @@ TEST(TxLoop, BeforeTheConnectResultTheWorkerPostsTheEnd) {
     net::SendQueue q(net::kAudioLimits);
     q.Open(E);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"hello"})", f.now), net::PushResult::kQueued);
-    TxLoop tx(LinkSide::kAudio, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kAudio, E, &q, &phase, f.Ports());
     EXPECT_FALSE(tx.RunOnce());
     EXPECT_EQ(f.deaths.size(), 1u);
     EXPECT_TRUE(f.posted.empty());
@@ -177,7 +177,7 @@ TEST(TxLoop, ASendErrorEndsThePairByTheSide) {
         net::SendQueue q(side == LinkSide::kAudio ? net::kAudioLimits : net::kCtrlLimits);
         q.Open(E);
         ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"x"})", f.now), net::PushResult::kQueued);
-        TxLoop tx(side, &q, &phase, f.Ports());
+        TxLoop tx(side, E, &q, &phase, f.Ports());
         EXPECT_FALSE(tx.RunOnce());
         EXPECT_TRUE(f.deaths.empty());  // a closed peer is not F2: the receive side sees it too
         ASSERT_EQ(f.posted.size(), 1u);
@@ -195,14 +195,14 @@ TEST(TxLoop, TheStopRequestLeavesWithoutNotices) {
     net::SendQueue q(net::kAudioLimits);
     q.Open(E);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"x"})", f.now), net::PushResult::kQueued);
-    TxLoop tx(LinkSide::kAudio, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kAudio, E, &q, &phase, f.Ports());
     EXPECT_FALSE(tx.RunOnce());
     EXPECT_TRUE(f.wire.empty());
 
     Fake g;  // the stop comes while a send waits for room
     g.mode = Fake::kBlock;
     g.stop_after_slices = 1;
-    TxLoop tx2(LinkSide::kAudio, &q, &phase, g.Ports());
+    TxLoop tx2(LinkSide::kAudio, E, &q, &phase, g.Ports());
     EXPECT_FALSE(tx2.RunOnce());
     EXPECT_TRUE(g.deaths.empty());
     EXPECT_TRUE(g.posted.empty());
@@ -217,7 +217,7 @@ TEST(TxLoop, TheFlushIsReportedOnceWhenTheDoneIsSent) {
     q.Open(E);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"abort","state":"done"})", f.now), net::PushResult::kQueued);
     q.CloseForFlush();
-    TxLoop tx(LinkSide::kCtrl, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kCtrl, E, &q, &phase, f.Ports());
     EXPECT_TRUE(tx.RunOnce());
     ASSERT_EQ(f.posted.size(), 1u);
     EXPECT_EQ(f.posted[0].kind, InKind::kCtrlFlushed);
@@ -237,7 +237,7 @@ TEST(TxLoop, AFailedFlushIsReportedWithTheEnd) {
     q.Open(E);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"abort","state":"done"})", f.now), net::PushResult::kQueued);
     q.CloseForFlush();
-    TxLoop tx(LinkSide::kCtrl, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kCtrl, E, &q, &phase, f.Ports());
     EXPECT_FALSE(tx.RunOnce());
     ASSERT_EQ(f.posted.size(), 2u);
     EXPECT_EQ(f.posted[0].kind, InKind::kEndRequest);
@@ -252,7 +252,7 @@ TEST(TxLoop, NoFlushNoticeWithoutAFlush) {
     net::SendQueue q(net::kCtrlLimits);
     q.Open(E);
     q.Close();
-    TxLoop tx(LinkSide::kCtrl, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kCtrl, E, &q, &phase, f.Ports());
     EXPECT_TRUE(tx.RunOnce());
     EXPECT_TRUE(f.posted.empty());
 
@@ -261,7 +261,7 @@ TEST(TxLoop, NoFlushNoticeWithoutAFlush) {
     net::SendQueue r(net::kCtrlLimits);
     r.Open(E);
     ASSERT_EQ(r.Push(E, net::ElemKind::kJson, R"({"type":"x"})", g.now), net::PushResult::kQueued);
-    TxLoop tx2(LinkSide::kCtrl, &r, &phase, g.Ports());
+    TxLoop tx2(LinkSide::kCtrl, E, &r, &phase, g.Ports());
     EXPECT_FALSE(tx2.RunOnce());
     ASSERT_EQ(g.posted.size(), 1u);
     EXPECT_EQ(g.posted[0].kind, InKind::kEndRequest);
@@ -275,7 +275,7 @@ TEST(TxLoop, PongCloseAndBrokenJson) {
     ASSERT_EQ(q.Push(E, net::ElemKind::kPong, "pp", f.now), net::PushResult::kQueued);
     ASSERT_EQ(q.Push(E, net::ElemKind::kJson, "not json", f.now), net::PushResult::kQueued);
     ASSERT_EQ(q.Push(E, net::ElemKind::kClose, "", f.now), net::PushResult::kQueued);
-    TxLoop tx(LinkSide::kAudio, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kAudio, E, &q, &phase, f.Ports());
     for (int i = 0; i < 3; i++) EXPECT_TRUE(tx.RunOnce());
     const auto frames = f.Frames();
     ASSERT_EQ(frames.size(), 2u);
@@ -292,7 +292,7 @@ TEST(TxLoop, AClosedQueueRestsInsteadOfSpinning) {
     Fake f;
     LinkPhase phase;
     net::SendQueue q(net::kAudioLimits);  // never opened: the link is up, its hello not queued yet
-    TxLoop tx(LinkSide::kAudio, &q, &phase, f.Ports());
+    TxLoop tx(LinkSide::kAudio, E, &q, &phase, f.Ports());
     EXPECT_TRUE(tx.RunOnce());
     EXPECT_EQ(f.idles, (std::vector<int64_t>{kIdleUs}));
     EXPECT_TRUE(f.posted.empty());
@@ -302,7 +302,7 @@ TEST(TxLoop, AClosedQueueRestsInsteadOfSpinning) {
     r.Open(E);
     ASSERT_EQ(r.Push(E, net::ElemKind::kJson, R"({"type":"abort","state":"done"})", g.now), net::PushResult::kQueued);
     r.CloseForFlush();
-    TxLoop tx2(LinkSide::kCtrl, &r, &phase, g.Ports());
+    TxLoop tx2(LinkSide::kCtrl, E, &r, &phase, g.Ports());
     EXPECT_TRUE(tx2.RunOnce());  // sends the done: no rest
     EXPECT_TRUE(g.idles.empty());
     EXPECT_TRUE(tx2.RunOnce());  // flushed: rests
@@ -339,4 +339,54 @@ TEST(TxLoop, AFullQueueEndsThePairAClosedOneDoesNot) {
     EXPECT_EQ(QueueJsonOrEnd(q, E + 1, R"({"type":"hello"})", 0, stop, post), net::PushResult::kQueued);
     EXPECT_EQ(deaths.size(), 1u);
     EXPECT_EQ(posted.size(), 1u);
+}
+
+// A violation's control queue stays closed for the flush until the next pair opens it, and the
+// next control link's send task starts before that (reviews 151/152 Important 1). The new link
+// must not report the last pair's flush (its one notice would be spent) ...
+TEST(TxLoop, TheLastPairsFlushIsNotReportedByTheNextLink) {
+    constexpr uint64_t E2 = E + 1;
+    Fake f;
+    LinkPhase phase;
+    phase.OnResultPosted();
+    net::SendQueue q(net::kCtrlLimits);
+    q.Open(E);
+    q.CloseForFlush();  // the last pair: flushed and ended, never opened again
+    TxLoop tx(LinkSide::kCtrl, E2, &q, &phase, f.Ports());
+    EXPECT_TRUE(tx.RunOnce());
+    EXPECT_TRUE(f.posted.empty());
+    q.Open(E2);
+    ASSERT_EQ(q.Push(E2, net::ElemKind::kJson, R"({"type":"abort","state":"done"})", f.now), net::PushResult::kQueued);
+    q.CloseForFlush();
+    EXPECT_TRUE(tx.RunOnce());
+    EXPECT_TRUE(tx.RunOnce());
+    ASSERT_EQ(f.posted.size(), 1u);
+    EXPECT_EQ(f.posted[0].kind, InKind::kCtrlFlushed);
+    EXPECT_EQ(f.posted[0].e, E2);
+}
+
+// ... nor send what the last pair left in it: the link's first JSON is its own hello, seq 1 with
+// its own E (contract S8).
+TEST(TxLoop, TheLastPairsJsonIsNotSentOnTheNextLink) {
+    constexpr uint64_t E2 = E + 1;
+    Fake f;
+    LinkPhase phase;
+    phase.OnResultPosted();
+    net::SendQueue q(net::kCtrlLimits);
+    q.Open(E);
+    ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"abort","state":"done","req_id":"x"})", f.now),
+              net::PushResult::kQueued);
+    q.CloseForFlush();  // the flush was cut short: the done is still in the queue
+    TxLoop tx(LinkSide::kCtrl, E2, &q, &phase, f.Ports());
+    EXPECT_TRUE(tx.RunOnce());
+    EXPECT_TRUE(f.wire.empty());
+    EXPECT_TRUE(f.posted.empty());
+    EXPECT_EQ(tx.stats().stale, 1u);
+    q.Open(E2);
+    ASSERT_EQ(q.Push(E2, net::ElemKind::kJson, R"({"type":"hello"})", f.now), net::PushResult::kQueued);
+    EXPECT_TRUE(tx.RunOnce());
+    const auto frames = f.Frames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(Num(frames[0].payload, "fw_epoch"), E2);
+    EXPECT_EQ(Num(frames[0].payload, "seq"), 1u);
 }

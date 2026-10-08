@@ -33,8 +33,8 @@ net::PushResult QueueJsonOrEnd(net::SendQueue& q, uint64_t e, std::string json, 
     return r;
 }
 
-TxLoop::TxLoop(LinkSide side, net::SendQueue* queue, LinkPhase* phase, TxPorts ports)
-    : side_(side), queue_(queue), phase_(phase), p_(std::move(ports)) {}
+TxLoop::TxLoop(LinkSide side, uint64_t e, net::SendQueue* queue, LinkPhase* phase, TxPorts ports)
+    : side_(side), e_(e), queue_(queue), phase_(phase), p_(std::move(ports)) {}
 
 void TxLoop::End(uint64_t e, EndReason reason) {
     if (phase_->OnEnded(LinkPhase::Side::kTx)) {
@@ -49,6 +49,7 @@ void TxLoop::End(uint64_t e, EndReason reason) {
 // can send no more of it.
 void TxLoop::PostFlushedOnce() {
     if (side_ != LinkSide::kCtrl || flushed_posted_) return;
+    if (queue_->e() != e_) return;  // an earlier pair's flush: not this link's one notice
     flushed_posted_ = true;
     p_.post(Notice(InKind::kCtrlFlushed, queue_->e()));
 }
@@ -59,6 +60,10 @@ bool TxLoop::RunOnce() {
     if (!elem) {
         if (queue_->FlushDone()) PostFlushedOnce();
         if (queue_->Drained()) p_.idle(kIdleUs);  // closed and empty: Pop would not wait
+        return true;
+    }
+    if (elem->e != e_) {  // left by an earlier pair: never sent ahead of this link's hello
+        stats_.stale++;
         return true;
     }
 

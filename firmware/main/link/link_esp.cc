@@ -51,7 +51,7 @@ Link::Link(LinkParams params)
     : p_(std::move(params)),
       rx_(p_.side, p_.attempt, p_.e, p_.session_id, p_.plan.version, &phase_,
           WithLinkPorts(p_.rx_ports, &last_rx_us_, p_.queue, p_.stop_for_death)),
-      tx_(p_.side, p_.queue, &phase_,
+      tx_(p_.side, p_.e, p_.queue, &phase_,
           TxPorts{[] { return esp_timer_get_time(); },
                   [this](const uint8_t* d, size_t n, int64_t timeout) { return tcp_.SendSlice(d, n, timeout); },
                   [this] { return Stopping(); },
