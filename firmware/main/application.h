@@ -18,6 +18,15 @@
 #include "listening_profile.h"
 #include "device_state.h"
 #include "device_state_machine.h"
+#include "app_link.h"
+#include "link_hub.h"
+#include "link_manager.h"
+#include "outbound.h"
+#include "playback_gate.h"
+#include "send_queue.h"
+#include "stat_report.h"
+#include "ui_controller.h"
+#include "ui_ports_esp.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -33,6 +42,8 @@
 #define MAIN_EVENT_START_LISTENING      (1 << 10)
 #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
+// StackChan FW-A2 (design §2.4): UiController has events (the one bit that wakes the main task)
+#define MAIN_EVENT_UI                   (1 << 13)
 
 
 enum AecMode {
@@ -67,8 +78,10 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+    // StackChan FW-A2 (design §1.2): the link manager's view, never UiController's state
     std::string GetConnectedGatewayUrl() const {
-        return protocol_ ? protocol_->GetConnectedUrl() : "";
+        stackchan::link::LinkHub* hub = hub_view_.load();
+        return hub ? hub->ConnectedUrl() : "";
     }
     
     /**
@@ -88,48 +101,38 @@ public:
     void Alert(const char* status, const char* message, const char* emotion = "", const std::string_view& sound = "");
     void DismissAlert();
 
-    void AbortSpeaking(AbortReason reason);
-
-    /**
-     * Toggle chat state (event-based, thread-safe)
-     * Sends MAIN_EVENT_TOGGLE_CHAT to be handled in Run()
-     */
+    // StackChan FW-A2 (design §2.4, plan 2B-2a handoff 19): the public entries other boards call.
+    // Thread-safe: each sets its event bit; the main task routes it by the device state then
+    // (ui::RouteEntry) into a UiController event. The profile is not used (a device-started
+    // listening is voice; the gateway's listen carries its own).
     void ToggleChatState();
-
-    /**
-     * Start listening (event-based, thread-safe)
-     * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
-     */
     void StartListening(ListeningProfile profile = kListeningProfileVoice);
-
-    /**
-     * Stop listening (event-based, thread-safe)
-     * Sends MAIN_EVENT_STOP_LISTENING to be handled in Run()
-     */
     void StopListening();
+    // The board's classified touch (ui::ClassifyTouch): Touch in a conversation state (any task),
+    // the settings screens' audio test (scheduled on the main task)
+    void Touch();
+    void ToggleAudioTesting();
+    // The main task only: leave the conversation for WifiConfiguring / Upgrading (design §2.4)
+    void EnterNonConversation(DeviceState target);
 
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
-    void SendMcpMessage(const std::string& payload);
+    // StackChan FW-A2 (design §4.1): what the device sends on its own goes into the audio send
+    // queue at once (link::Outbound; never waits, any task). An MCP reply goes out on the pair
+    // its request came on (e); the others on the pair bound at send time.
+    void SendMcpMessage(uint64_t e, const std::string& payload);
     void SendStackChanEvent(const char* event_type, const char* subtype, uint64_t duration_ms);
-
-    // Phase 4.5 avatar: thread-safe generic WS text frame send.
-    // Wraps Protocol::SendText through the main-task Schedule for the
-    // same thread-safety reasons as SendMcpMessage. Intended for board-
-    // initiated notifications such as avatar_set_loaded.
+    // Phase 4.5 avatar: a board notice such as avatar_set_loaded (a JSON object, sent as it is)
     void SendJsonString(const std::string& json_str);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
     
-    /**
-     * Reset protocol resources (thread-safe)
-     * Can be called from any task to release resources allocated after network connected
-     * This includes closing audio channel, resetting protocol and ota objects
-     */
+    // StackChan FW-A2 (design §3.5): the link objects live until the restart; this only ends the
+    // pair and stops reconnecting (thread-safe).
     void ResetProtocol();
 
 private:
@@ -138,42 +141,48 @@ private:
 
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
-    std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
-    ListeningMode listening_mode_ = kListeningModeAutoStop;
-    std::atomic<ListeningProfile> pending_listening_profile_{kListeningProfileVoice};
-    std::atomic<uint32_t> pending_listening_generation_{0};
-    std::atomic<uint32_t> listening_request_generation_{0};
-    ListeningProfile listening_profile_ = kListeningProfileVoice;
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
     std::unique_ptr<Ota> ota_;
 
     bool has_server_time_ = false;
-    bool aborted_ = false;
     bool assets_version_checked_ = false;
-    bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
+    // StackChan FW-A2: the link side (design §1, §2, §3). Made once and never destroyed (a restart
+    // ends them): the queues, the gate, UiController and Outbound in Initialize(); the app ports
+    // and the link hub in the first InitializeProtocol() (design §3.5).
+    std::unique_ptr<stackchan::link::NoticeQueue> notices_;
+    std::unique_ptr<stackchan::net::SendQueue> audio_queue_;
+    std::unique_ptr<stackchan::net::SendQueue> ctrl_queue_;
+    std::unique_ptr<stackchan::gate::PlaybackGate> gate_;
+    std::unique_ptr<stackchan::ui::UiPortsEsp> ui_ports_;
+    std::unique_ptr<stackchan::ui::UiController> ui_;
+    std::unique_ptr<stackchan::link::Outbound> outbound_;
+    std::unique_ptr<stackchan::link::AppLink> app_link_;
+    std::unique_ptr<stackchan::link::LinkHub> hub_;
+    // hub_ is made on the activation task; the other tasks read it through this (set after Start)
+    std::atomic<stackchan::link::LinkHub*> hub_view_{nullptr};
+    bool protocol_initialized_ = false;  // the activation task, once per boot
 
     // Event handlers
     void HandleStateChangedEvent();
-    void HandleToggleChatEvent();
-    void HandleStartListeningEvent();
-    void HandleStopListeningEvent();
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
-    void HandleWakeWordDetectedEvent();
-    uint32_t BeginListeningRequest(ListeningProfile profile);
-    void InvalidatePendingListeningRequest();
-    bool IsListeningRequestCurrent(uint32_t generation) const;
-    void ContinueOpenAudioChannel(ListeningMode mode, uint32_t generation);
-    void ContinueWakeWordInvoke(const std::string& wake_word, uint32_t generation);
+    // StackChan FW-A2
+    void CreateLinkSide();
+    void HandleEntry(stackchan::ui::Entry entry);
+    void PostUi(stackchan::ui::EvKind kind);
+    stackchan::link::StatInputs CollectStat();
+    void ShowAppMessage(const stackchan::link::AppMessage& message);
+    // Reboot / OTA (design §3.5): no reconnect, end the pair, wait for it at most 1 s
+    void EndLinks();
 
     // Activation task (runs in background)
     void ActivationTask();
@@ -183,7 +192,6 @@ private:
     void CheckNewVersion();
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
-    void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;
     
     // State change handler called by state machine

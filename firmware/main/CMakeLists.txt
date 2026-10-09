@@ -1052,6 +1052,8 @@ list(APPEND SOURCES
     "link/link_hub.cc"
     "link/stat_report.cc"
     "link/app_link.cc"
+    "link/outbound.cc"
+    "link/connect_inputs_esp.cc"
     "net/send_queue.cc"
     "net/send_deadline.cc"
 )

@@ -88,6 +88,8 @@ public:
     // override these to drive lip-sync animation while TTS audio is playing.
     virtual void OnTtsStart() {}
     virtual void OnTtsStop() {}
+    // StackChan FW-A2 (design §2.4 v10): UiController lights it while listening. Default: nothing.
+    virtual void SetListeningLed(bool on) { (void)on; }
 
     // Phase 4.5 avatar (saiverse-stackchan-addon): dynamic avatar set fetch
     // notification dispatched from Application::OnIncomingJson. The cJSON

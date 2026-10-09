@@ -3,13 +3,13 @@
 #include "display.h"
 #include "system_info.h"
 #include "audio_codec.h"
-#include "mqtt_protocol.h"
-#include "websocket_protocol.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
-#include "abort_policy.h"
+#include "connect_inputs_esp.h"
+#include "message_stamp.h"
+#include "server_time.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -17,28 +17,11 @@
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <esp_app_desc.h>
+#include <esp_system.h>
 
 #define TAG "Application"
 
-namespace {
-
-ListeningProfile ParseListenProfile(const cJSON* root) {
-    auto profile = cJSON_GetObjectItem(root, "profile");
-    bool profile_present = profile != nullptr;
-    bool profile_is_string = cJSON_IsString(profile);
-    auto result = ParseListenProfileField(profile_present,
-                                          profile_is_string,
-                                          profile_is_string ? profile->valuestring : nullptr);
-    if (result.warning == kListenProfileParseWarningNonString) {
-        ESP_LOGW(TAG, "listen profile is not a string; falling back to voice");
-    } else if (result.warning == kListenProfileParseWarningUnknown) {
-        ESP_LOGW(TAG, "Unknown listen profile: %s; falling back to voice",
-                 profile->valuestring);
-    }
-    return result.profile;
-}
-
-} // namespace
 
 
 Application::Application() {
@@ -80,6 +63,10 @@ bool Application::SetDeviceState(DeviceState state) {
 }
 
 void Application::Initialize() {
+    // StackChan FW-A2: the queues, the gate, UiController and Outbound (no network yet), before the
+    // board is made: its timers start with it and post touches and events (Claude review 163 Minor 7)
+    CreateLinkSide();
+
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
 
@@ -92,7 +79,6 @@ void Application::Initialize() {
     // Setup the audio service
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
-    audio_service_.Start();
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
@@ -104,7 +90,14 @@ void Application::Initialize() {
     callbacks.on_vad_change = [this](bool speaking) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
+    // StackChan FW-A2 (design §2.4): under audio_queue_mutex_, so only post (audio_queue -> ui_queue)
+    callbacks.on_playback_drained = [this]() {
+        PostUi(stackchan::ui::EvKind::kPlaybackDrained);
+    };
     audio_service_.SetCallbacks(callbacks);
+    // StackChan FW-A2: start the audio tasks after the callbacks are set (they read them unlocked;
+    // Claude review 161, an observation)
+    audio_service_.Start();
 
     // Add state change listeners
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
@@ -187,7 +180,7 @@ void Application::Run() {
     // Set the priority of the main task to 10
     vTaskPrioritySet(nullptr, 10);
 
-    const EventBits_t ALL_EVENTS = 
+    const EventBits_t ALL_EVENTS =
         MAIN_EVENT_SCHEDULE |
         MAIN_EVENT_SEND_AUDIO |
         MAIN_EVENT_WAKE_WORD_DETECTED |
@@ -200,13 +193,18 @@ void Application::Run() {
         MAIN_EVENT_START_LISTENING |
         MAIN_EVENT_STOP_LISTENING |
         MAIN_EVENT_ACTIVATION_DONE |
-        MAIN_EVENT_STATE_CHANGED;
+        MAIN_EVENT_STATE_CHANGED |
+        MAIN_EVENT_UI;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & MAIN_EVENT_ERROR) {
-            SetDeviceState(kDeviceStateIdle);
+            // StackChan FW-A2 (design §2.4): back to the conversation only when the device really
+            // went to Idle
+            if (SetDeviceState(kDeviceStateIdle)) {
+                PostUi(stackchan::ui::EvKind::kResync);
+            }
             Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         }
 
@@ -226,34 +224,44 @@ void Application::Run() {
             HandleStateChangedEvent();
         }
 
+        // StackChan FW-A2 (design §2.4): the public entries, routed by the device state now
         if (bits & MAIN_EVENT_TOGGLE_CHAT) {
-            HandleToggleChatEvent();
+            HandleEntry(stackchan::ui::Entry::kToggleChat);
         }
 
         if (bits & MAIN_EVENT_START_LISTENING) {
-            HandleStartListeningEvent();
+            HandleEntry(stackchan::ui::Entry::kStartListening);
         }
 
         if (bits & MAIN_EVENT_STOP_LISTENING) {
-            HandleStopListeningEvent();
+            HandleEntry(stackchan::ui::Entry::kStopListening);
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
+            // StackChan FW-A2 (design §4.1): the mic audio into the audio send queue (never waits;
+            // when it is full the oldest mic frames go first)
+            stackchan::link::LinkHub* hub = hub_view_.load();
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
-                if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
-                    break;
+                if (hub != nullptr) {
+                    hub->PushMic(packet->timestamp, packet->payload.data(), packet->payload.size());
                 }
             }
         }
 
         if (bits & MAIN_EVENT_WAKE_WORD_DETECTED) {
-            HandleWakeWordDetectedEvent();
+            HandleEntry(stackchan::ui::Entry::kWakeWord);
         }
 
         if (bits & MAIN_EVENT_VAD_CHANGE) {
             if (GetDeviceState() == kDeviceStateListening) {
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
+            }
+        }
+
+        if (bits & MAIN_EVENT_UI) {
+            // One event at a time, until the list is empty (design §2.4)
+            while (ui_->ProcessOne()) {
             }
         }
 
@@ -270,7 +278,7 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-        
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -305,14 +313,8 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
-    // Close current conversation when network disconnected
-    auto state = GetDeviceState();
-    if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
-        ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
-        protocol_->CloseAudioChannel();
-    }
-
-    // Update the status bar immediately to show the network state
+    // StackChan FW-A2 (design §3.5): nothing for the link manager. The pair ends by F1 or a TCP
+    // failure, and its LinkDown closes the logical channel.
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
 }
@@ -321,7 +323,14 @@ void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
 
     SystemInfo::PrintHeapStats();
-    SetDeviceState(kDeviceStateIdle);
+    // StackChan FW-A2: the settings from what the assets made (the wake word detector is made when
+    // they are applied, on the activation task before this event; Codex review 162)
+    ui_->Configure(stackchan::ui::MakeUiConfig(audio_service_));
+    // StackChan FW-A2 (design §2.4): the conversation starts here (Resync), only when the device
+    // really went to Idle (Activating's inputs were dropped meanwhile)
+    if (SetDeviceState(kDeviceStateIdle)) {
+        PostUi(stackchan::ui::EvKind::kResync);
+    }
 
     has_server_time_ = ota_->HasServerTime();
 
@@ -516,256 +525,107 @@ void Application::CheckNewVersion() {
 }
 
 void Application::InitializeProtocol() {
+    // StackChan FW-A2 (design §3.5): the link objects are made once per boot. A second call (back
+    // from the Wi-Fi settings) restarts instead: the running tasks could not be destroyed safely.
+    if (protocol_initialized_) {
+        ESP_LOGW(TAG, "InitializeProtocol again: restarting");
+        esp_restart();
+    }
+    protocol_initialized_ = true;
+
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
-    auto codec = board.GetAudioCodec();
-
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-    // Force WebSocket protocol for the stackchan-mcp gateway (bypass OTA config)
-    protocol_ = std::make_unique<WebsocketProtocol>();
+    uint32_t boot_count = 0;
     {
-        // StackChan FW-A (design §2.2): persistent boot counter for fw_epoch.
+        // StackChan FW-A (design §2.2): persistent boot counter for fw_epoch. Settings commits in
+        // its destructor, so it is closed before anything that may restart.
         Settings settings("stackchan", true);
-        uint32_t boot_count = stackchan::NextBootCount(settings.GetInt("boot_count", 0));
+        boot_count = stackchan::NextBootCount(settings.GetInt("boot_count", 0));
         settings.SetInt("boot_count", stackchan::BootCountToStore(boot_count));
-        protocol_->SetBootCount(boot_count);
-        ESP_LOGI(TAG, "StackChan boot_count=%u", static_cast<unsigned>(boot_count));
+    }
+    ESP_LOGI(TAG, "StackChan boot_count=%u", static_cast<unsigned>(boot_count));
+
+    // The receive side's app ports (plan 2B-2a handoff 5): what the application does with the
+    // messages of the pair. The receive tasks call them; main-task work goes through Schedule.
+    stackchan::link::AppDeps app;
+    app.gate = gate_.get();
+    app.ctrl_queue = ctrl_queue_.get();
+    app.notices = notices_.get();
+    app.now_us = []() { return esp_timer_get_time(); };
+    app.apply_server_time = [](const cJSON* server_time) {
+        // StackChan FW-A (design §2.6): optional wall-clock time from the gateway. Never fails
+        // the hello: a missing or invalid server_time leaves the clock and TZ untouched.
+        stackchan::ServerTime time;
+        if (!stackchan::ParseServerTime(server_time, &time)) {
+            ESP_LOGW(TAG, "server_time in hello is invalid; ignored");
+            return;
+        }
+        auto result = stackchan::ApplyServerTime(time);
+        if (result == stackchan::ApplyResult::kOk) {
+            // Read the clock back: the acceptance compares it with the UTC that was sent.
+            // The newlib nano printf cannot format a 64-bit %lld (it prints "ld"), so the
+            // 64-bit value goes through std::to_string.
+            ESP_LOGI(TAG, "server_time set (hello): clock_utc_ms=%s offset_min=%d",
+                     std::to_string(stackchan::ReadClockUtcMs()).c_str(),
+                     static_cast<int>(time.offset_min));
+        } else {
+            ESP_LOGW(TAG, "server_time (hello): %s", stackchan::ApplyResultText(result));
+        }
+    };
+    app.on_audio_only = [this]() {
+        // kAudioOnly brings no LinkUp: wake the power save timer anyway (design §2.4)
+        Schedule([]() {
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        });
+    };
+    app.push_server_audio = [this](std::unique_ptr<AudioStreamPacket>& packet) {
+        return audio_service_.PushServerAudio(packet);
+    };
+    app.post_app = [this](stackchan::link::AppMessage message) {
+        Schedule([this, message = std::move(message)]() {
+            ShowAppMessage(message);
+        });
+    };
+    app.avatar_set_fetch = [](const cJSON* root) {
+        Board::GetInstance().OnAvatarSetFetch(root);
+    };
+    app.mcp = [](uint64_t e, const cJSON* payload) {
+        McpServer::GetInstance().ParseMessage(e, payload);
+    };
+    app.stat_inputs = [this]() {
+        return CollectStat();
+    };
+#if CONFIG_RECEIVE_CUSTOM_MESSAGE
+    app.receive_custom = true;
+#endif
+    app_link_ = std::make_unique<stackchan::link::AppLink>(app);
+    if (const char* missing = app_link_->Missing()) {
+        // An empty port would abort on the first message (Claude review 156 Minor 5)
+        ESP_LOGE(TAG, "app port %s is empty: the link is not started", missing);
+        return;
     }
 
-    protocol_->OnConnected([this]() {
-        DismissAlert();
-        // StackChan FW-A (design §2.1.2): the rejected-server-audio counter is per connection.
-        uint32_t rejected = audio_service_.TakeServerAudioRejected();
-        if (rejected > 0) {
-            ESP_LOGI(TAG, "server audio rejected on the previous connection: %u packets",
-                     static_cast<unsigned>(rejected));
-        }
-    });
-
-    protocol_->OnNetworkError([this](const std::string& message) {
-        last_error_message_ = message;
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
-    });
-    
-    protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
-            // StackChan FW-A: gated so audio racing with an abort is dropped (design §2.1.2)
-            audio_service_.PushServerPacketToDecodeQueue(std::move(packet));
-        }
-    });
-    
-    protocol_->OnAudioChannelOpened([this, codec, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
-            ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
-                protocol_->server_sample_rate(), codec->output_sample_rate());
-        }
-    });
-    
-    protocol_->OnAudioChannelClosed([this, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        Schedule([this]() {
-            auto display = Board::GetInstance().GetDisplay();
-            display->SetChatMessage("system", "");
-            SetDeviceState(kDeviceStateIdle);
-        });
-    });
-    
-    protocol_->OnIncomingJson([this, display, &board](const cJSON* root) {
-        // Parse JSON data
-        auto type = cJSON_GetObjectItem(root, "type");
-        if (strcmp(type->valuestring, "tts") == 0) {
-            auto state = cJSON_GetObjectItem(root, "state");
-            if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this, &board]() {
-                    aborted_ = false;
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        // StackChan FW-A: no state-change event will fire, so re-open
-                        // server audio here (it is re-opened after the Speaking
-                        // transition's ResetDecoder() otherwise). Idempotent.
-                        audio_service_.AcceptServerAudio(true);
-                    }
-                    SetDeviceState(kDeviceStateSpeaking);
-                    // Phase 4 audio (Issue #76): drive avatar mouth animation
-                    // for the lifetime of this TTS utterance. Default no-op
-                    // for boards without a mouth display.
-                    board.OnTtsStart();
-                });
-            } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this, &board]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        // stackchan-mcp is an MCP gateway, not a standalone
-                        // xiaozhi-style conversational agent. Listening must
-                        // be triggered explicitly — either by the user
-                        // (touch / button / external command) or by the
-                        // AI (gateway-issued StartListening). The upstream
-                        // xiaozhi behaviour of automatically re-entering
-                        // listening after every TTS utterance is a footgun
-                        // here: when the firmware's TTS pipeline stalls
-                        // (e.g. audio_input task watchdog timeouts during
-                        // long playback) the deferred tts.stop event lands
-                        // long after the user expected the conversation to
-                        // be quiescent, and the device then records ~30 s
-                        // of ambient room audio that the gateway happily
-                        // posts as a user utterance.
-                        //
-                        // Returning to Idle here forces the listening
-                        // boundary to be set explicitly by whoever wants
-                        // to continue the conversation (user touch,
-                        // gateway-driven push-to-talk, etc.). Loop-style
-                        // Listening→Speaking→Listening flows belong on
-                        // the gateway side, not in this firmware.
-                        SetDeviceState(kDeviceStateIdle);
-                    }
-                    // Phase 4 audio (Issue #76): stop the avatar mouth
-                    // animation unconditionally on tts.stop. A wake-word /
-                    // button interrupt can call AbortSpeaking() and move
-                    // the device out of Speaking before the server's
-                    // tts.stop arrives, in which case the previous-state
-                    // guard above is false but the audio playback has
-                    // ended and the mouth animation must still stop.
-                    // OnTtsStop() is idempotent (no-op for boards without
-                    // an avatar / when lip-sync is already stopped).
-                    board.OnTtsStop();
-                });
-            } else if (strcmp(state->valuestring, "sentence_start") == 0) {
-                auto text = cJSON_GetObjectItem(root, "text");
-                if (cJSON_IsString(text)) {
-                    ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
-                    });
-                }
-            }
-        } else if (strcmp(type->valuestring, "listen") == 0) {
-            // Server-driven listening trigger (Issue #91,
-            // kisaragi-mochi/stackchan-mcp). Mirrors the existing
-            // device->gateway ``Protocol::SendStartListening()`` wire format in
-            // the reverse direction so the gateway can request the device to
-            // enter / leave listening state without a physical button press or
-            // wake-word. Used by the gateway-side ``listen()`` MCP tool to
-            // perform STT capture on demand.
-            //
-            // ``profile`` selects the microphone capture source for this
-            // listen session. Missing / ``voice`` preserves the existing AFE
-            // voice path; ``raw`` bypasses AFE and streams pre-AFE mic
-            // PCM through the same Opus SendAudio path.
-            //
-            // Phase 1 honours only ``state: "start" | "stop"``; the ``mode``
-            // field is parsed but currently ignored because
-            // ``HandleStartListeningEvent()`` unconditionally calls
-            // ``SetListeningMode(kListeningModeManualStop)``. Manual-stop is
-            // also the right default for gateway-driven capture: the gateway
-            // controls the exact stop boundary by issuing
-            // ``{"type":"listen","state":"stop"}`` after its capture window.
-            // Threading ``auto`` / ``realtime`` mode through is a follow-up.
-            auto state = cJSON_GetObjectItem(root, "state");
-            if (!cJSON_IsString(state)) {
-                ESP_LOGW(TAG, "listen message missing state");
-            } else if (strcmp(state->valuestring, "start") == 0) {
-                auto profile = ParseListenProfile(root);
-                Schedule([this, profile]() {
-                    StartListening(profile);
-                });
-            } else if (strcmp(state->valuestring, "stop") == 0) {
-                StopListening();
-            } else {
-                ESP_LOGW(TAG, "Unknown listen state: %s", state->valuestring);
-            }
-        } else if (strcmp(type->valuestring, "stt") == 0) {
-            auto text = cJSON_GetObjectItem(root, "text");
-            if (cJSON_IsString(text)) {
-                ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([display, message = std::string(text->valuestring)]() {
-                    display->SetChatMessage("user", message.c_str());
-                });
-            }
-        } else if (strcmp(type->valuestring, "llm") == 0) {
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
-            if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
-                });
-            }
-        } else if (strcmp(type->valuestring, "abort") == 0) {
-            // StackChan FW-A (design §2.1): server-requested abort. Empties the
-            // decode/playback queues immediately (unlike tts stop, which lets the
-            // queue drain) and replies {"type":"abort","state":"done"}.
-            // A reply-shaped abort ({"state":...}) is never treated as a request.
-            std::string reason;
-            if (stackchan::IsAbortRequest(root, protocol_->session_id(), &reason)) {
-                Schedule([this, &board, reason]() {
-                    uint32_t cleared = audio_service_.ResetDecoder();
-                    aborted_ = true;
-                    if (stackchan::AbortReturnsToIdle(GetDeviceState())) {
-                        SetDeviceState(kDeviceStateIdle);
-                    }
-                    board.OnTtsStop();
-                    if (protocol_) {
-                        cJSON* done = stackchan::BuildAbortDone(
-                            protocol_->session_id(), reason, stackchan::DroppedMs(cleared));
-                        protocol_->SendJson(done);
-                        cJSON_Delete(done);
-                    }
-                    ESP_LOGI(TAG, "abort(%s): cleared %u queued packets, rejected %u server packets since the last report",
-                             reason.c_str(), static_cast<unsigned>(cleared),
-                             static_cast<unsigned>(audio_service_.TakeServerAudioRejected()));
-                });
-            } else {
-                ESP_LOGD(TAG, "Ignoring abort message that is not a request");
-            }
-        } else if (strcmp(type->valuestring, "mcp") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
-            if (cJSON_IsObject(payload)) {
-                McpServer::GetInstance().ParseMessage(payload);
-            }
-        } else if (strcmp(type->valuestring, "system") == 0) {
-            auto command = cJSON_GetObjectItem(root, "command");
-            if (cJSON_IsString(command)) {
-                ESP_LOGI(TAG, "System command: %s", command->valuestring);
-                if (strcmp(command->valuestring, "reboot") == 0) {
-                    // Do a reboot if user requests a OTA update
-                    Schedule([this]() {
-                        Reboot();
-                    });
-                } else {
-                    ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
-                }
-            }
-        } else if (strcmp(type->valuestring, "alert") == 0) {
-            auto status = cJSON_GetObjectItem(root, "status");
-            auto message = cJSON_GetObjectItem(root, "message");
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
-            if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
-                Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::OGG_VIBRATION);
-            } else {
-                ESP_LOGW(TAG, "Alert command requires status, message and emotion");
-            }
-        } else if (strcmp(type->valuestring, "avatar_set_fetch") == 0) {
-            // Phase 4.5 avatar (saiverse-stackchan-addon): dispatch to the
-            // current board for HTTP fetch + SHA256 verify + AvatarSet adoption.
-            // Non-stackchan boards default to a no-op (Board::OnAvatarSetFetch).
-            // See docs/intent/stackchan_avatar_pipeline.md §C-3 (SAIVerse).
-            board.OnAvatarSetFetch(root);
-#if CONFIG_RECEIVE_CUSTOM_MESSAGE
-        } else if (strcmp(type->valuestring, "custom") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
-            ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
-            if (cJSON_IsObject(payload)) {
-                Schedule([this, display, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
-                    display->SetChatMessage("system", payload_str.c_str());
-                });
-            } else {
-                ESP_LOGW(TAG, "Invalid custom message format: missing payload");
-            }
-#endif
-        } else {
-            ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
-        }
-    });
-    
-    protocol_->Start();
+    stackchan::link::HubDeps hub;
+    hub.notices = notices_.get();
+    hub.audio_queue = audio_queue_.get();
+    hub.ctrl_queue = ctrl_queue_.get();
+    hub.gate = gate_.get();
+    hub.ui = ui_.get();
+    hub.boot_count = boot_count;
+    hub.app = app_link_->Ports();
+    hub.read_inputs = []() {
+        return stackchan::link::ReadConnectInputs();
+    };
+    hub.server_aec = aec_mode_ == kAecOnServerSide;
+    hub.frame_duration_ms = OPUS_FRAME_DURATION_MS;
+    hub_ = std::make_unique<stackchan::link::LinkHub>(hub);
+    if (!hub_->Start()) {
+        ESP_LOGE(TAG, "the link manager task did not start");
+        return;
+    }
+    hub_view_.store(hub_.get());
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -822,275 +682,80 @@ void Application::ToggleChatState() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
 }
 
-uint32_t Application::BeginListeningRequest(ListeningProfile profile) {
-    uint32_t generation = listening_request_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
-    pending_listening_profile_.store(profile, std::memory_order_release);
-    pending_listening_generation_.store(generation, std::memory_order_release);
-    return generation;
-}
-
-void Application::InvalidatePendingListeningRequest() {
-    listening_request_generation_.fetch_add(1, std::memory_order_acq_rel);
-    pending_listening_profile_.store(kListeningProfileVoice, std::memory_order_release);
-    pending_listening_generation_.store(0, std::memory_order_release);
-}
-
-bool Application::IsListeningRequestCurrent(uint32_t generation) const {
-    return generation != 0 &&
-        listening_request_generation_.load(std::memory_order_acquire) == generation;
-}
-
 void Application::StartListening(ListeningProfile profile) {
-    // Thin event setter. The popup-on-listening flag is armed inside
-    // HandleStartListeningEvent (main task) so all writes to
-    // play_popup_on_listening_ converge to the same task that reads
-    // and clears it in HandleStateChangedEvent.
-    BeginListeningRequest(profile);
+    if (profile != kListeningProfileVoice) {
+        ESP_LOGW(TAG, "StartListening: a device-started listening is voice (profile %d not used)",
+                 static_cast<int>(profile));
+    }
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
 void Application::StopListening() {
-    InvalidatePendingListeningRequest();
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
-void Application::HandleToggleChatEvent() {
-    auto state = GetDeviceState();
-    
-    if (state == kDeviceStateActivating) {
-        SetDeviceState(kDeviceStateIdle);
-        return;
-    } else if (state == kDeviceStateWifiConfiguring) {
-        audio_service_.EnableAudioTesting(true);
-        SetDeviceState(kDeviceStateAudioTesting);
-        return;
-    } else if (state == kDeviceStateAudioTesting) {
-        audio_service_.EnableAudioTesting(false);
-        SetDeviceState(kDeviceStateWifiConfiguring);
-        return;
-    }
-
-    if (!protocol_) {
-        ESP_LOGE(TAG, "Protocol not initialized");
-        return;
-    }
-
-    if (state == kDeviceStateIdle) {
-        ListeningMode mode = GetDefaultListeningMode();
-        if (!protocol_->IsAudioChannelOpened()) {
-            uint32_t generation = BeginListeningRequest(kListeningProfileVoice);
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this, mode, generation]() {
-                ContinueOpenAudioChannel(mode, generation);
-            });
-            return;
-        }
-        SetListeningMode(mode);
-    } else if (state == kDeviceStateSpeaking) {
-        AbortSpeaking(kAbortReasonNone);
-    } else if (state == kDeviceStateListening) {
-        protocol_->CloseAudioChannel();
+void Application::Touch() {
+    // The board classified it (ui::ClassifyTouch) on its timer task; UiController drops it when
+    // the conversation is suspended meanwhile
+    if (ui_) {
+        PostUi(stackchan::ui::EvKind::kTouch);
     }
 }
 
-void Application::ContinueOpenAudioChannel(ListeningMode mode, uint32_t generation) {
-    // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting || !IsListeningRequestCurrent(generation)) {
-        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
-        return;
-    }
-
-    if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
+void Application::ToggleAudioTesting() {
+    // Design §2.4: decided on the main task with the state then (a touch that waited may find the
+    // screen changed: logged and dropped, never a conversation Toggle)
+    Schedule([this]() {
+        auto target = stackchan::ui::AudioTestingToggleTarget(GetDeviceState());
+        if (!target.has_value()) {
+            ESP_LOGI(TAG, "audio test toggle dropped in state %d", static_cast<int>(GetDeviceState()));
             return;
         }
-    }
-
-    if (!IsListeningRequestCurrent(generation)) {
-        if (protocol_->IsAudioChannelOpened()) {
-            protocol_->CloseAudioChannel();
-        }
-        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
-        SetDeviceState(kDeviceStateIdle);
-        return;
-    }
-
-    SetListeningMode(mode);
+        audio_service_.EnableAudioTesting(*target == kDeviceStateAudioTesting);
+        SetDeviceState(*target);
+    });
 }
 
-void Application::HandleStartListeningEvent() {
-    auto state = GetDeviceState();
-    auto requested_generation = pending_listening_generation_.load(std::memory_order_acquire);
-    if (!IsListeningRequestCurrent(requested_generation)) {
-        return;
-    }
-    
-    if (state == kDeviceStateActivating) {
-        SetDeviceState(kDeviceStateIdle);
-        return;
-    } else if (state == kDeviceStateWifiConfiguring) {
-        audio_service_.EnableAudioTesting(true);
-        SetDeviceState(kDeviceStateAudioTesting);
-        return;
-    }
-
-    if (!protocol_) {
-        ESP_LOGE(TAG, "Protocol not initialized");
-        return;
-    }
-
-    auto requested_profile = pending_listening_profile_.load(std::memory_order_acquire);
-    if (state == kDeviceStateIdle || state == kDeviceStateSpeaking) {
-        listening_profile_ = requested_profile;
-
-        // Arm the OGG_POPUP cue that HandleStateChangedEvent plays after
-        // the kDeviceStateListening branch resets the decoder
-        // (~line 980). Previously this flag was set only on wake-word
-        // activation paths (HandleWakeWordDetectedEvent /
-        // ContinueWakeWordInvoke), so callers of the public
-        // StartListening() API — board-level touch buttons,
-        // server-driven listen, etc. — silently lost the cue.
-        //
-        // Setting it here (main task, after the Activating /
-        // WifiConfiguring / null-protocol early returns and gated on
-        // the states that actually transition toward Listening) avoids
-        // latching the flag for a no-op StartListening so an unrelated
-        // future Listening transition doesn't unexpectedly play the
-        // popup.
-        play_popup_on_listening_ = true;
-    }
-
-    if (state == kDeviceStateIdle) {
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this, requested_generation]() {
-                ContinueOpenAudioChannel(kListeningModeManualStop, requested_generation);
-            });
-            return;
-        }
-        SetListeningMode(kListeningModeManualStop);
-    } else if (state == kDeviceStateSpeaking) {
-        AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(kListeningModeManualStop);
+void Application::EnterNonConversation(DeviceState target) {
+    if (ui_) {
+        ui_->EnterNonConversation(target);
+    } else {
+        SetDeviceState(target);
     }
 }
 
-void Application::HandleStopListeningEvent() {
-    auto state = GetDeviceState();
-    
-    if (state == kDeviceStateAudioTesting) {
-        audio_service_.EnableAudioTesting(false);
-        SetDeviceState(kDeviceStateWifiConfiguring);
-        return;
-    } else if (state == kDeviceStateConnecting) {
-        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
-        play_popup_on_listening_ = false;
-        if (protocol_ && protocol_->IsAudioChannelOpened()) {
-            protocol_->CloseAudioChannel();
-        }
-        SetDeviceState(kDeviceStateIdle);
-        return;
-    } else if (state == kDeviceStateListening) {
-        if (protocol_) {
-            protocol_->SendStopListening();
-        }
-        SetDeviceState(kDeviceStateIdle);
-    }
+void Application::PostUi(stackchan::ui::EvKind kind) {
+    stackchan::ui::Event ev;
+    ev.kind = kind;
+    ui_->Post(ev);
 }
 
-void Application::HandleWakeWordDetectedEvent() {
-    if (!protocol_) {
-        return;
-    }
-
-    auto state = GetDeviceState();
-    if (listening_profile_ == kListeningProfileRaw) {
-        ESP_LOGI(TAG, "Ignoring wake word event while raw listening profile is active (state: %d)", (int)state);
-        audio_service_.EnableWakeWordDetection(false);
-        return;
-    }
-
-    auto wake_word = audio_service_.GetLastWakeWord();
-    ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
-
-    if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-        auto wake_word = audio_service_.GetLastWakeWord();
-        uint32_t generation = BeginListeningRequest(kListeningProfileVoice);
-
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update),
-            // then continue with OpenAudioChannel which may block for ~1 second
-            Schedule([this, wake_word, generation]() {
-                ContinueWakeWordInvoke(wake_word, generation);
-            });
-            return;
+void Application::HandleEntry(stackchan::ui::Entry entry) {
+    namespace ui = stackchan::ui;
+    const DeviceState state = GetDeviceState();
+    switch (ui::RouteEntry(entry, state)) {
+        case ui::EntryRoute::kTouch:
+            PostUi(ui::EvKind::kTouch);
+            break;
+        case ui::EntryRoute::kToggle:
+            PostUi(ui::EvKind::kToggle);
+            break;
+        case ui::EntryRoute::kWakeWord: {
+            ESP_LOGI(TAG, "Wake word: %s", audio_service_.GetLastWakeWord().c_str());
+            ui::Event ev;
+            ev.kind = ui::EvKind::kWakeWord;
+            ev.mode = GetDefaultListeningMode() == kListeningModeRealtime ? ui::Mode::kRealtime
+                                                                          : ui::Mode::kAutoStop;
+            ui_->Post(ev);
+            break;
         }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word, generation);
-    } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
-        AbortSpeaking(kAbortReasonWakeWordDetected);
-        // Clear send queue to avoid sending residues to server
-        while (audio_service_.PopPacketFromSendQueue());
-
-        if (state == kDeviceStateListening) {
-            protocol_->SendStartListening(GetDefaultListeningMode());
-            audio_service_.ResetDecoder();
-            audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
-            // Re-enable wake word detection as it was stopped by the detection itself
-            audio_service_.EnableWakeWordDetection(true);
-        } else {
-            // Play popup sound and start listening again
-            play_popup_on_listening_ = true;
-            SetListeningMode(GetDefaultListeningMode());
-        }
-    } else if (state == kDeviceStateActivating) {
-        // Restart the activation check if the wake word is detected during activation
-        SetDeviceState(kDeviceStateIdle);
+        case ui::EntryRoute::kToggleAudioTesting:
+            ToggleAudioTesting();
+            break;
+        case ui::EntryRoute::kDrop:
+            ESP_LOGI(TAG, "entry %d dropped in state %d", static_cast<int>(entry), static_cast<int>(state));
+            break;
     }
-}
-
-void Application::ContinueWakeWordInvoke(const std::string& wake_word, uint32_t generation) {
-    // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting || !IsListeningRequestCurrent(generation)) {
-        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
-        return;
-    }
-
-    if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
-            audio_service_.EnableWakeWordDetection(true);
-            return;
-        }
-    }
-
-    if (!IsListeningRequestCurrent(generation)) {
-        if (protocol_->IsAudioChannelOpened()) {
-            protocol_->CloseAudioChannel();
-        }
-        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
-        SetDeviceState(kDeviceStateIdle);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
-#if CONFIG_SEND_WAKE_WORD_DATA
-    // Encode and send the wake word data to the server
-    while (auto packet = audio_service_.PopWakeWordPacket()) {
-        protocol_->SendAudio(std::move(packet));
-    }
-    // Set the chat state to wake word detected
-    protocol_->SendWakeWordDetected(wake_word);
-    SetListeningMode(GetDefaultListeningMode());
-#else
-    // Set flag to play popup sound after state changes to listening
-    // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
-    play_popup_on_listening_ = true;
-    SetListeningMode(GetDefaultListeningMode());
-#endif
 }
 
 void Application::HandleStateChangedEvent() {
@@ -1101,86 +766,32 @@ void Application::HandleStateChangedEvent() {
     auto display = board.GetDisplay();
     auto led = board.GetLed();
     led->OnStateChanged();
-    
+
+    // StackChan FW-A2 (design §2.4): in the conversation states only the look stays here (the last
+    // state's look wins when changes come together). The mic, the listen messages, the queues,
+    // the sounds and the wake word detector are UiController's.
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
-            audio_service_.EnableRawCapture(false);
-            audio_service_.EnableVoiceProcessing(false);
-            listening_profile_ = ListeningProfileAfterStop(listening_profile_);
-            audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
-        case kDeviceStateListening: {
+        case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
-
-            // Make sure the selected listening source is running
-            bool is_raw_profile = listening_profile_ == kListeningProfileRaw;
-            bool is_listening_source_running = is_raw_profile
-                ? audio_service_.IsRawCaptureRunning()
-                : audio_service_.IsAudioProcessorRunning();
-            if (play_popup_on_listening_ || !is_listening_source_running) {
-                // For auto mode, wait for playback queue to be empty before enabling mic capture
-                // This prevents audio truncation when STOP arrives late due to network jitter
-                if (listening_mode_ == kListeningModeAutoStop) {
-                    audio_service_.WaitForPlaybackQueueEmpty();
-                }
-                
-                // Send the start listening command
-                protocol_->SendStartListening(listening_mode_);
-                if (is_raw_profile) {
-                    audio_service_.EnableVoiceProcessing(false);
-                    audio_service_.EnableRawCapture(true);
-                } else {
-                    audio_service_.EnableRawCapture(false);
-                    audio_service_.EnableVoiceProcessing(true);
-                }
-            }
-
-#ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
-            // Enable wake word detection in listening mode (configured via Kconfig)
-            audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
-#else
-            // Disable wake word detection in listening mode
-            audio_service_.EnableWakeWordDetection(false);
-#endif
-            
-            // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
-            if (play_popup_on_listening_) {
-                play_popup_on_listening_ = false;
-                audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
-            }
             break;
-        }
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
-
-            if (listening_profile_ == kListeningProfileRaw) {
-                audio_service_.EnableRawCapture(false);
-            }
-            if (listening_mode_ != kListeningModeRealtime) {
-                audio_service_.EnableVoiceProcessing(false);
-                // Only AFE wake word can be detected in speaking mode
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
-            }
-            listening_profile_ = ListeningProfileAfterStop(listening_profile_);
-            audio_service_.ResetDecoder();
-            // StackChan FW-A (design §2.1.2): ResetDecoder() closed server audio;
-            // re-open it now that the device is Speaking.
-            audio_service_.AcceptServerAudio(true);
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableRawCapture(false);
             audio_service_.EnableVoiceProcessing(false);
-            listening_profile_ = ListeningProfileAfterStop(listening_profile_);
             audio_service_.EnableWakeWordDetection(false);
             break;
         default:
@@ -1197,34 +808,31 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
-void Application::AbortSpeaking(AbortReason reason) {
-    ESP_LOGI(TAG, "Abort speaking");
-    aborted_ = true;
-    if (protocol_) {
-        protocol_->SendAbortSpeaking(reason);
-    }
-}
-
-void Application::SetListeningMode(ListeningMode mode) {
-    listening_mode_ = mode;
-    SetDeviceState(kDeviceStateListening);
-}
-
 ListeningMode Application::GetDefaultListeningMode() const {
     return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
 }
 
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
-    // Disconnect the audio channel
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        protocol_->CloseAudioChannel();
-    }
-    protocol_.reset();
+    // StackChan FW-A2 (design §3.5): nothing is destroyed (esp_restart calls no destructor); the
+    // pair is ended first so the gateway sees it go
+    EndLinks();
     audio_service_.Stop();
-
-    vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
+}
+
+void Application::EndLinks() {
+    stackchan::link::LinkHub* hub = hub_view_.load();
+    if (hub == nullptr) {
+        return;
+    }
+    hub->RequestShutdown();
+    // Until the pair is over and none of its tasks runs (the links sent their close), at most 1 s
+    // (today's vTaskDelay(1000)); restart even when it is not over by then. Not TransportConnected:
+    // it drops as soon as the end is decided (Claude review 163 Important 1)
+    for (int i = 0; i < 20 && !hub->Stopped(); i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
@@ -1234,17 +842,15 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     std::string upgrade_url = url;
     std::string version_info = version.empty() ? "(Manual upgrade)" : version;
 
-    // Close audio channel if it's open
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        ESP_LOGI(TAG, "Closing audio channel before firmware upgrade");
-        protocol_->CloseAudioChannel();
-    }
+    // StackChan FW-A2 (design §3.5): leave the conversation (the main task: MCP's
+    // self.upgrade_firmware runs there; CheckNewVersion's call is skipped by
+    // CONFIG_STACKCHAN_SKIP_OTA_CHECK), end the pair, then fetch with HttpClient
+    EnterNonConversation(kDeviceStateUpgrading);
+    EndLinks();
     ESP_LOGI(TAG, "Starting firmware upgrade from URL: %s", upgrade_url.c_str());
 
     Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download", Lang::Sounds::OGG_UPGRADE);
     vTaskDelay(pdMS_TO_TICKS(3000));
-
-    SetDeviceState(kDeviceStateUpgrading);
 
     std::string message = std::string(Lang::Strings::NEW_VERSION) + version_info;
     display->SetChatMessage("system", message.c_str());
@@ -1262,12 +868,13 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     });
 
     if (!upgrade_success) {
-        // Upgrade failed, restart audio service and continue running
-        ESP_LOGE(TAG, "Firmware upgrade failed, restarting audio service and continuing operation...");
-        audio_service_.Start(); // Restart audio service
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
+        // StackChan FW-A2 (design §3.5): the pair is over and the conversation suspended, so restart
+        // (today stayed in Upgrading with no way back)
+        ESP_LOGE(TAG, "Firmware upgrade failed, restarting...");
+        audio_service_.Start();
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
+        esp_restart();
         return false;
     } else {
         // Upgrade success, reboot immediately
@@ -1280,37 +887,9 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {
-    if (!protocol_) {
-        return;
-    }
-
-    auto state = GetDeviceState();
-    
-    if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-        uint32_t generation = BeginListeningRequest(kListeningProfileVoice);
-
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this, wake_word, generation]() {
-                ContinueWakeWordInvoke(wake_word, generation);
-            });
-            return;
-        }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word, generation);
-    } else if (state == kDeviceStateSpeaking) {
-        Schedule([this]() {
-            AbortSpeaking(kAbortReasonNone);
-        });
-    } else if (state == kDeviceStateListening) {   
-        Schedule([this]() {
-            if (protocol_) {
-                protocol_->CloseAudioChannel();
-            }
-        });
-    }
+    // StackChan FW-A2 (design §2.4 v10): the WakeWord event (nothing is encoded or sent)
+    ESP_LOGI(TAG, "WakeWordInvoke: %s", wake_word.c_str());
+    xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
 }
 
 bool Application::CanEnterSleepMode() {
@@ -1318,19 +897,10 @@ bool Application::CanEnterSleepMode() {
         return false;
     }
 
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        return false;
-    }
-
-    // Block sleep while the MCP control transport (e.g. WebSocket) is alive.
-    // After PR #169 the WebSocket is established at boot for persistent MCP
-    // control, decoupled from any audio session — without this check the
-    // legacy PowerSaveTimer would still trip after ~60 s of idle even
-    // though MCP tools remain in use, dropping the transport and forcing a
-    // touch / wake to recover. Subclasses that lack a persistent transport
-    // notion inherit the default `return false;` from Protocol so existing
-    // behavior is unchanged for them.
-    if (protocol_ && protocol_->IsTransportConnected()) {
+    // Block sleep while the gateway link is alive (MCP stays usable). StackChan FW-A2 (design
+    // §1.2): the link manager's view, a bound pair or the audio link alone (kAudioOnly).
+    stackchan::link::LinkHub* hub = hub_view_.load();
+    if (hub != nullptr && hub->TransportConnected()) {
         return false;
     }
 
@@ -1342,59 +912,33 @@ bool Application::CanEnterSleepMode() {
     return true;
 }
 
-void Application::SendMcpMessage(const std::string& payload) {
-    // Always schedule to run in main task for thread safety
-    Schedule([this, payload = std::move(payload)]() {
-        if (protocol_) {
-            protocol_->SendMcpMessage(payload);
-        }
-    });
+void Application::SendMcpMessage(uint64_t e, const std::string& payload) {
+    if (!outbound_) {
+        return;
+    }
+    auto r = outbound_->McpReply(e, payload);
+    if (r != stackchan::link::OutResult::kQueued) {
+        ESP_LOGW(TAG, "mcp reply not sent (%d)", static_cast<int>(r));
+    }
 }
 
 void Application::SendStackChanEvent(
     const char* event_type, const char* subtype, uint64_t duration_ms) {
-    std::string event_type_str = event_type ? event_type : "";
-    std::string subtype_str = subtype ? subtype : "";
-    Schedule([this, event_type_str, subtype_str, duration_ms]() {
-        if (!protocol_ || !protocol_->IsTransportConnected()) {
-            return;
-        }
-
-        cJSON* root = cJSON_CreateObject();
-        if (root == nullptr) {
-            return;
-        }
-        cJSON_AddStringToObject(root, "session_id", protocol_->session_id().c_str());
-        cJSON_AddStringToObject(root, "type", "stackchan-event");
-        cJSON_AddStringToObject(root, "event_type", event_type_str.c_str());
-        cJSON_AddStringToObject(root, "subtype", subtype_str.c_str());
-        cJSON_AddNumberToObject(root, "duration_ms", static_cast<double>(duration_ms));
-        cJSON_AddNumberToObject(root, "ts", static_cast<double>(esp_timer_get_time() / 1000ULL));
-
-        protocol_->SendJson(root);  // StackChan FW-A: stamped with fw_epoch/seq
-        cJSON_Delete(root);
-    });
+    if (!outbound_) {
+        return;
+    }
+    outbound_->StackChanEvent(event_type ? event_type : "", subtype ? subtype : "", duration_ms,
+                              esp_timer_get_time() / 1000);
 }
 
 void Application::SendJsonString(const std::string& json_str) {
-    // Thread-safe generic WS text frame send. Used by board-initiated
-    // notifications such as avatar_set_loaded (Phase 4.5 avatar). Mirrors
-    // SendMcpMessage's main-task Schedule pattern for protocol safety.
-    // StackChan FW-A (design §2.2): re-parse so the frame is stamped with
-    // fw_epoch/seq; non-JSON or non-object input is dropped (no seq consumed).
-    Schedule([this, json_str]() {
-        if (!protocol_) {
-            return;
-        }
-        cJSON* root = cJSON_Parse(json_str.c_str());
-        if (root == nullptr || !cJSON_IsObject(root)) {
-            ESP_LOGW(TAG, "SendJsonString: not a JSON object, dropped");
-            cJSON_Delete(root);
-            return;
-        }
-        protocol_->SendJson(root);
-        cJSON_Delete(root);
-    });
+    // A board notice such as avatar_set_loaded: the pair bound now; not a JSON object: dropped
+    if (!outbound_) {
+        return;
+    }
+    if (outbound_->JsonString(json_str) == stackchan::link::OutResult::kBadJson) {
+        ESP_LOGW(TAG, "SendJsonString: not a JSON object, dropped");
+    }
 }
 
 void Application::SetAecMode(AecMode mode) {
@@ -1417,10 +961,8 @@ void Application::SetAecMode(AecMode mode) {
             break;
         }
 
-        // If the AEC mode is changed, close the audio channel
-        if (protocol_ && protocol_->IsAudioChannelOpened()) {
-            protocol_->CloseAudioChannel();
-        }
+        // StackChan FW-A2: the hello's aec feature is fixed when the link hub is made
+        // (HubDeps::server_aec); the logical channel is UiController's and stays as it is
     });
 }
 
@@ -1429,12 +971,142 @@ void Application::PlaySound(const std::string_view& sound) {
 }
 
 void Application::ResetProtocol() {
-    Schedule([this]() {
-        // Close audio channel if opened
-        if (protocol_ && protocol_->IsAudioChannelOpened()) {
-            protocol_->CloseAudioChannel();
-        }
-        // Reset protocol
-        protocol_.reset();
+    // StackChan FW-A2 (design §3.5): the link objects stay (a second InitializeProtocol restarts);
+    // the pair ends and no reconnect follows
+    stackchan::link::LinkHub* hub = hub_view_.load();
+    if (hub != nullptr) {
+        hub->RequestShutdown();
+    }
+}
+
+// StackChan FW-A2 (design §1, §2): the queues, the gate, UiController and Outbound. No network;
+// the link hub that uses them comes in InitializeProtocol.
+void Application::CreateLinkSide() {
+    namespace gate = stackchan::gate;
+    namespace link = stackchan::link;
+    namespace net = stackchan::net;
+    namespace ui = stackchan::ui;
+
+    notices_ = std::make_unique<link::NoticeQueue>();
+    audio_queue_ = std::make_unique<net::SendQueue>(net::kAudioLimits);
+    ctrl_queue_ = std::make_unique<net::SendQueue>(net::kCtrlLimits);
+
+    gate::GatePorts ports;
+    ports.audio = audio_service_.playback_sink();
+    ports.audio_queue = audio_queue_.get();
+    ports.ctrl_queue = ctrl_queue_.get();
+    ports.now_us = []() { return esp_timer_get_time(); };
+    // Under the gate lock: only post (gate -> ui_queue, design §1.2)
+    ports.post_gate_changed = [this](uint64_t e, bool spk, uint32_t rev) {
+        ui::Event ev;
+        ev.kind = ui::EvKind::kGateChanged;
+        ev.e = e;
+        ev.spk = spk;
+        ev.rev = rev;
+        ui_->Post(ev);
+    };
+    ports.post_link_up = [this](uint64_t e, bool spk, uint32_t rev) {
+        ui::Event ev;
+        ev.kind = ui::EvKind::kLinkUp;
+        ev.e = e;
+        ev.spk = spk;
+        ev.rev = rev;
+        ui_->Post(ev);
+    };
+    ports.end_pair = [this](uint64_t e, link::EndReason reason, bool flush) {
+        link::Input in;
+        in.kind = link::InKind::kEndRequest;
+        in.e = e;
+        in.reason = reason;
+        in.flush = flush;
+        notices_->Post(in);  // never waits; a full list restarts (design §3.8)
+    };
+    gate_ = std::make_unique<gate::PlaybackGate>(ports);
+
+    ui::UiEspDeps deps;
+    deps.app = this;
+    deps.audio = &audio_service_;
+    deps.gate = gate_.get();
+    deps.audio_queue = audio_queue_.get();
+    deps.notices = notices_.get();
+    deps.listening_led = [](bool on) {
+        Board::GetInstance().SetListeningLed(on);
+    };
+    ui_ports_ = std::make_unique<ui::UiPortsEsp>(deps);
+    // The settings depend on the assets (the wake word detector): Configure at the activation done
+    ui_ = std::make_unique<ui::UiController>(ui_ports_.get(), ui::UiConfig{});
+    ui_ports_->BindUi(ui_.get());
+    ui_->SetWake([this]() {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_UI);
     });
+
+    link::OutboundDeps out;
+    out.gate = gate_.get();
+    out.audio_queue = audio_queue_.get();
+    out.notices = notices_.get();
+    out.now_us = []() { return esp_timer_get_time(); };
+    out.bound_pair = [this]() {
+        link::LinkHub* hub = hub_view_.load();
+        return hub != nullptr ? hub->BoundPair() : uint64_t{0};
+    };
+    outbound_ = std::make_unique<link::Outbound>(out);
+}
+
+// What the receive side's app JSON asks of the main task (today's OnIncomingJson)
+void Application::ShowAppMessage(const stackchan::link::AppMessage& message) {
+    using Kind = stackchan::link::AppMessage::Kind;
+    auto display = Board::GetInstance().GetDisplay();
+    switch (message.kind) {
+        case Kind::kAssistantText:
+            ESP_LOGI(TAG, "<< %s", message.text.c_str());
+            display->SetChatMessage("assistant", message.text.c_str());
+            break;
+        case Kind::kUserText:
+            ESP_LOGI(TAG, ">> %s", message.text.c_str());
+            display->SetChatMessage("user", message.text.c_str());
+            break;
+        case Kind::kEmotion:
+            display->SetEmotion(message.emotion.c_str());
+            break;
+        case Kind::kAlert:
+            // The sound never waits here: on the main task a full decode queue (a playback) would
+            // hold up the UI events (Claude review 163 Minor 6)
+            Alert(message.status.c_str(), message.text.c_str(), message.emotion.c_str());
+            if (!audio_service_.PlaySoundNoWait(Lang::Sounds::OGG_VIBRATION)) {
+                ESP_LOGW(TAG, "alert sound: the decode queue was full");
+            }
+            break;
+        case Kind::kReboot:
+            Reboot();
+            break;
+        case Kind::kCustom:
+            display->SetChatMessage("system", message.text.c_str());
+            break;
+    }
+}
+
+// stat (contract §5.1, design §6.2; plan 2B-2a handoff 3): each source under its own lock only,
+// one after another (no lock held while another is taken). The control receive task calls it.
+stackchan::link::StatInputs Application::CollectStat() {
+    stackchan::link::StatInputs in;
+    in.gate = gate_->Snapshot();
+    in.gate_stats = gate_->Stats();
+    in.book = audio_service_.PlaybackBookSnapshot();
+    in.pipeline = audio_service_.PlaybackStats();
+    in.ui = ui_->stats();
+    stackchan::link::LinkHub* hub = hub_view_.load();
+    if (hub != nullptr) {
+        hub->FillStat(&in);
+    }
+    in.app = app_link_->stats();
+    const stackchan::link::OutboundStats out = outbound_->stats();
+    in.app.out_unbound = out.unbound;
+    in.app.out_closed = out.closed;
+    in.app.out_bad_json = out.bad_json;
+    in.heap_free = esp_get_free_heap_size();
+    in.heap_min = esp_get_minimum_free_heap_size();
+    char sha[9] = {};
+    esp_app_get_elf_sha256(sha, sizeof(sha));
+    in.build = std::string(esp_app_get_description()->version) + " " + sha;
+    return in;
 }

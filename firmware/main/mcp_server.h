@@ -436,7 +436,11 @@ public:
     void AddTool(McpTool* tool);
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
-    void ParseMessage(const cJSON* json);
+    // StackChan FW-A2 (design §4.1): e is the pair the request came on; every reply goes out on it
+    // (Application::SendMcpMessage drops it when that pair has ended). Without e (other boards local
+    // transports) e is 0 and the replies are dropped.
+    void ParseMessage(uint64_t e, const cJSON* json);
+    void ParseMessage(const cJSON* json) { ParseMessage(0, json); }
     void ParseMessage(const std::string& message);
 
 private:
@@ -445,11 +449,11 @@ private:
 
     void ParseCapabilities(const cJSON* capabilities);
 
-    void ReplyResult(int id, const std::string& result);
-    void ReplyError(int id, const std::string& message);
+    void ReplyResult(uint64_t e, int id, const std::string& result);
+    void ReplyError(uint64_t e, int id, const std::string& message);
 
-    void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools);
-    void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
+    void GetToolsList(uint64_t e, int id, const std::string& cursor, bool list_user_only_tools);
+    void DoToolCall(uint64_t e, int id, const std::string& tool_name, const cJSON* tool_arguments);
 
     std::vector<McpTool*> tools_;
 };

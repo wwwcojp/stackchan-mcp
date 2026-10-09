@@ -1,8 +1,7 @@
 // StackChan FW-A2 plan 2B-2a (design §2.4, plan 2A handoff 10): UiController's ports on the ESP.
 // The main task calls them (UiController::ProcessOne / EnterNonConversation), outside the gate
-// lock; the listening timer's callback only posts ListenTimeout(req). Built, not used until plan
-// 2B-2b creates it (MicOn still goes through EnableVoiceProcessing / EnableRawCapture, which clear
-// the queues until 2B-2b takes ResetDecoder() out of them).
+// lock; the listening timer's callback only posts ListenTimeout(req). Application makes them at
+// start (plan 2B-2b).
 #pragma once
 
 #include <esp_timer.h>
@@ -42,6 +41,9 @@ class UiPortsEsp : public UiPorts {
 public:
     explicit UiPortsEsp(UiEspDeps deps);
     ~UiPortsEsp() override;
+    // The UiController is made with these ports, so it comes after them: set it before any
+    // ArmTimer (the main task, at start).
+    void BindUi(UiController* ui) { d_.ui = ui; }
 
     DeviceState CurrentState() override;
     bool SetDeviceState(DeviceState s) override;
