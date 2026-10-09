@@ -20,11 +20,19 @@ void RxLink::Drop(const char* why) {
     stats_.last_drop = why;
 }
 
+const char* MissingAppPort(const RxPorts& p) {
+    if (!p.hello_reply) return "hello_reply";
+    if (!p.server_audio) return "server_audio";
+    if (!p.app_json) return "app_json";
+    if (!p.stat) return "stat";
+    return nullptr;
+}
+
 // The link ended: the pair ends once (the phase leaves it to the worker before the result).
 void RxLink::End(EndReason reason) {
     if (ended_) return;
     ended_ = true;
-    if (phase_->OnEnded(LinkPhase::Side::kRx)) {
+    if (phase_->OnEnded(LinkPhase::Side::kRx, reason)) {
         Input in;
         in.kind = InKind::kEndRequest;
         in.e = e_;

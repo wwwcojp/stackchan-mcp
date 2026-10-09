@@ -35,6 +35,10 @@ const char* SideName(LinkSide side) { return side == LinkSide::kAudio ? "audio" 
 LinkHub::LinkHub(HubDeps deps) : d_(std::move(deps)), manager_(this, d_.notices), stamp_(d_.boot_count) {}
 
 bool LinkHub::Start() {
+    if (const char* missing = MissingAppPort(d_.app)) {  // Claude review 152 Minor 3
+        ESP_LOGE(TAG, "app port %s is empty: not started", missing);
+        return false;
+    }
     return xTaskCreate(ManagerMain, "link_mgr", kManagerStack, this, kManagerPriority, nullptr) == pdPASS;
 }
 
@@ -163,7 +167,11 @@ void LinkHub::WorkerMain(void* arg) {
     const WorkerOutcome out = RunWorker(static_cast<Worker*>(arg));
     out.notices->Post(out.result);
     // An end the link's tasks saw before the result goes after it (design §3.8)
-    if (out.link != nullptr && out.link->phase().OnResultPosted()) out.notices->Post(out.end);
+    if (out.link != nullptr && out.link->phase().OnResultPosted()) {
+        Input end = out.end;  // the first reason a task saw (Claude review 152 Minor 1)
+        end.reason = out.link->phase().EndReasonOr(out.end.reason);
+        out.notices->Post(end);
+    }
     out.notices->Post(out.exited);  // the last touch of anything the manager may destroy
     vTaskDelete(nullptr);
 }

@@ -166,6 +166,7 @@ TEST(TxLoop, BeforeTheConnectResultTheWorkerPostsTheEnd) {
     EXPECT_EQ(f.deaths.size(), 1u);
     EXPECT_TRUE(f.posted.empty());
     EXPECT_TRUE(phase.OnResultPosted());  // the worker posts the end request after the result
+    EXPECT_EQ(phase.EndReasonOr(EndReason::kAudioClosed), EndReason::kF2);  // with F2, not "closed"
 }
 
 TEST(TxLoop, ASendErrorEndsThePairByTheSide) {
@@ -180,7 +181,8 @@ TEST(TxLoop, ASendErrorEndsThePairByTheSide) {
         TxLoop tx(side, E, &q, &phase, f.Ports());
         EXPECT_FALSE(tx.RunOnce());
         EXPECT_TRUE(f.deaths.empty());  // a closed peer is not F2: the receive side sees it too
-        ASSERT_EQ(f.posted.size(), 1u);
+        // the control link also reports its flush as done (it can send no more; plan 2B-2a)
+        ASSERT_EQ(f.posted.size(), side == LinkSide::kAudio ? 1u : 2u);
         EXPECT_EQ(f.posted[0].kind, InKind::kEndRequest);
         EXPECT_EQ(f.posted[0].reason, side == LinkSide::kAudio ? EndReason::kAudioClosed : EndReason::kCtrlClosed);
         EXPECT_EQ(tx.stats().errors, 1u);
@@ -244,8 +246,11 @@ TEST(TxLoop, AFailedFlushIsReportedWithTheEnd) {
     EXPECT_EQ(f.posted[1].kind, InKind::kCtrlFlushed);
 }
 
-// No flush: a plain close or a failure posts no kCtrlFlushed (it would be a stale input).
-TEST(TxLoop, NoFlushNoticeWithoutAFlush) {
+// No flush: a plain close posts no kCtrlFlushed. A failure does (plan 2B-2a, Codex review 151
+// Minor 1): the gate may close the queue for the flush only after this task gave up, and the
+// manager would wait 2 s for a notice that never comes; a manager that waits for no flush counts it
+// as a stale input.
+TEST(TxLoop, APlainCloseIsNoFlushButAFailureReportsIt) {
     Fake f;
     LinkPhase phase;
     phase.OnResultPosted();
@@ -263,8 +268,45 @@ TEST(TxLoop, NoFlushNoticeWithoutAFlush) {
     ASSERT_EQ(r.Push(E, net::ElemKind::kJson, R"({"type":"x"})", g.now), net::PushResult::kQueued);
     TxLoop tx2(LinkSide::kCtrl, E, &r, &phase, g.Ports());
     EXPECT_FALSE(tx2.RunOnce());
-    ASSERT_EQ(g.posted.size(), 1u);
+    ASSERT_EQ(g.posted.size(), 2u);
     EXPECT_EQ(g.posted[0].kind, InKind::kEndRequest);
+    EXPECT_EQ(g.posted[1].kind, InKind::kCtrlFlushed);
+    EXPECT_EQ(g.posted[1].e, E);
+}
+
+// Codex review 151 Minor 1: the done is queued and the end request posted, but the send fails
+// before the gate closes the queue for the flush. The flush notice still comes (after the end).
+TEST(TxLoop, AFailureBeforeTheFlushBeganStillReportsIt) {
+    for (Fake::Mode mode : {Fake::kError, Fake::kBlock}) {
+        Fake f;
+        f.mode = mode;
+        LinkPhase phase;
+        phase.OnResultPosted();
+        net::SendQueue q(net::kCtrlLimits);
+        q.Open(E);
+        ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"abort","state":"done"})", f.now), net::PushResult::kQueued);
+        TxLoop tx(LinkSide::kCtrl, E, &q, &phase, f.Ports());
+        EXPECT_FALSE(tx.RunOnce());
+        ASSERT_EQ(f.posted.size(), 2u) << mode;
+        EXPECT_EQ(f.posted[0].kind, InKind::kEndRequest);
+        EXPECT_EQ(f.posted[1].kind, InKind::kCtrlFlushed);
+        q.CloseForFlush();  // the gate, late
+        tx.RunOnce();
+        EXPECT_EQ(f.posted.size(), 2u);  // once
+    }
+    for (Fake::Mode mode : {Fake::kError, Fake::kBlock}) {  // the audio link never reports a flush
+        Fake f;
+        f.mode = mode;
+        LinkPhase phase;
+        phase.OnResultPosted();
+        net::SendQueue q(net::kAudioLimits);
+        q.Open(E);
+        ASSERT_EQ(q.Push(E, net::ElemKind::kJson, R"({"type":"x"})", f.now), net::PushResult::kQueued);
+        TxLoop tx(LinkSide::kAudio, E, &q, &phase, f.Ports());
+        EXPECT_FALSE(tx.RunOnce());
+        ASSERT_EQ(f.posted.size(), 1u);
+        EXPECT_EQ(f.posted[0].kind, InKind::kEndRequest);
+    }
 }
 
 TEST(TxLoop, PongCloseAndBrokenJson) {

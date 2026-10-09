@@ -193,26 +193,26 @@ TEST(LinkManagerShell, TakeWaitsUpToTheTimeoutAndWakesOnPost) {
 TEST(LinkPhase, AnEndAfterTheResultIsPostedOncePerSide) {
     LinkPhase p;
     EXPECT_FALSE(p.OnResultPosted());
-    EXPECT_TRUE(p.OnEnded(LinkPhase::Side::kRx));
-    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx));
-    EXPECT_TRUE(p.OnEnded(LinkPhase::Side::kTx));
-    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kTx));
+    EXPECT_TRUE(p.OnEnded(LinkPhase::Side::kRx, EndReason::kAudioClosed));
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx, EndReason::kAudioClosed));
+    EXPECT_TRUE(p.OnEnded(LinkPhase::Side::kTx, EndReason::kAudioClosed));
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kTx, EndReason::kAudioClosed));
 }
 
 TEST(LinkPhase, AnEndBeforeTheResultIsLeftToTheWorker) {
     LinkPhase p;
-    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx));
-    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kTx));
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx, EndReason::kAudioClosed));
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kTx, EndReason::kAudioClosed));
     EXPECT_TRUE(p.OnResultPosted());  // the worker posts it, after the result
-    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx));  // already posted for this side
-    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kTx));
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx, EndReason::kAudioClosed));  // already posted for this side
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kTx, EndReason::kAudioClosed));
 }
 
 TEST(LinkPhase, TheTxSideAfterTheResultStillPostsWhenOnlyRxLeftItToTheWorker) {
     LinkPhase p;
-    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx));
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx, EndReason::kAudioClosed));
     EXPECT_TRUE(p.OnResultPosted());
-    EXPECT_TRUE(p.OnEnded(LinkPhase::Side::kTx));  // a second end (allowed duplicate), once
+    EXPECT_TRUE(p.OnEnded(LinkPhase::Side::kTx, EndReason::kAudioClosed));  // a second end (allowed duplicate), once
 }
 
 TEST(LinkPhase, RacingWorkerAndTasksNeverLoseTheEndNorPostItBeforeTheResult) {
@@ -221,7 +221,7 @@ TEST(LinkPhase, RacingWorkerAndTasksNeverLoseTheEndNorPostItBeforeTheResult) {
         std::atomic<bool> result_posted{false};
         std::atomic<int> ends{0}, early{0};
         auto side = [&](LinkPhase::Side s) {
-            if (p.OnEnded(s)) {
+            if (p.OnEnded(s, EndReason::kAudioClosed)) {
                 if (!result_posted.load()) early++;
                 ends++;
             }
@@ -303,4 +303,47 @@ TEST(LinkManagerShell, ANoticeIsStampedWhenItIsTakenNotBefore) {
     r.ports.now = 106 * S;  // past 100.05 + 5 s, before 104.95 + 5 s
     r.m.RunOnce();
     EXPECT_EQ(r.ports.log, (std::vector<std::string>{"connect_audio 1", "audio_hello 1 " + FakePorts::N(E)}));
+}
+
+// Claude review 152 Minor 1: the worker's end request carries the first reason a task saw before
+// the result, not a blanket "closed".
+TEST(LinkPhase, TheWorkerPostsTheFirstReasonSeenBeforeTheResult) {
+    LinkPhase p;
+    EXPECT_EQ(p.EndReasonOr(EndReason::kAudioClosed), EndReason::kAudioClosed);
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx, EndReason::kServerClose));
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kRx, EndReason::kQueueFull));  // the same side again
+    EXPECT_FALSE(p.OnEnded(LinkPhase::Side::kTx, EndReason::kF2));
+    EXPECT_TRUE(p.OnResultPosted());
+    EXPECT_EQ(p.EndReasonOr(EndReason::kAudioClosed), EndReason::kServerClose);
+
+    LinkPhase q;  // the send side first
+    EXPECT_FALSE(q.OnEnded(LinkPhase::Side::kTx, EndReason::kF2));
+    EXPECT_FALSE(q.OnEnded(LinkPhase::Side::kRx, EndReason::kCtrlClosed));
+    EXPECT_TRUE(q.OnResultPosted());
+    EXPECT_EQ(q.EndReasonOr(EndReason::kCtrlClosed), EndReason::kF2);
+}
+
+// stat (contract §5.1): the pairs ended, by reason; a duplicate end request is not a second end.
+TEST(LinkManagerShell, CountsThePairsEndedByReason) {
+    Rig r;
+    r.Bound();
+    Input end = In(InKind::kEndRequest, E);
+    end.reason = EndReason::kServerClose;
+    r.Feed(end);
+    end.reason = EndReason::kF2;
+    r.Feed(end);  // the same pair: counted as a duplicate only
+    EXPECT_EQ(r.m.ends(EndReason::kServerClose), 1u);
+    EXPECT_EQ(r.m.ends(EndReason::kF2), 0u);
+    EXPECT_EQ(r.m.ends(EndReason::kNone), 0u);
+    EXPECT_EQ(r.m.duplicate_ends(), 1u);  // design §6.2: copied for stat
+    EXPECT_EQ(r.m.duplicate_ends(), r.m.state().duplicate_ends);
+    const uint32_t stale = r.m.state().stale_inputs;
+    r.Feed(In(InKind::kReadySent, E + 7));  // another pair: stale
+    EXPECT_EQ(r.m.state().stale_inputs, stale + 1);
+    EXPECT_EQ(r.m.stale_inputs(), stale + 1);
+    for (int i = 1; i <= 3; i++) {  // the ending's ticks are not new ends
+        r.ports.now = i * kTickUs;
+        r.m.RunOnce();
+    }
+    EXPECT_EQ(r.m.ends(EndReason::kServerClose), 1u);
 }

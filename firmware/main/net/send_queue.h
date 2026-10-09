@@ -83,6 +83,9 @@ public:
     bool Drained() const;  // closed for flush (or closed) and nothing left
     bool Flushing() const;   // closed for a flush (the done is being sent)
     bool FlushDone() const;  // closed for a flush and nothing left (kCtrlFlushed)
+    // FlushDone for the pair E, in one lock section: a link of the next pair never takes an
+    // earlier pair's finished flush for its own while Open(E) races it (Codex review 153 Minor 1)
+    bool FlushDoneFor(uint64_t e) const;
     QueueStats Stats() const;
     uint64_t e() const;
 

@@ -37,7 +37,7 @@ TxLoop::TxLoop(LinkSide side, uint64_t e, net::SendQueue* queue, LinkPhase* phas
     : side_(side), e_(e), queue_(queue), phase_(phase), p_(std::move(ports)) {}
 
 void TxLoop::End(uint64_t e, EndReason reason) {
-    if (phase_->OnEnded(LinkPhase::Side::kTx)) {
+    if (phase_->OnEnded(LinkPhase::Side::kTx, reason)) {
         Input in = Notice(InKind::kEndRequest, e);
         in.reason = reason;
         p_.post(in);
@@ -46,7 +46,9 @@ void TxLoop::End(uint64_t e, EndReason reason) {
 
 // The control link only: the manager waits for the flushed control queue after a violation
 // (the done). Posted once, when the queue is closed for a flush and empty, or when this task
-// can send no more of it.
+// can send no more of it: a failure or a missed deadline posts it whether the flush began or not
+// (plan 2B-2a: the gate may close the queue for the flush only after this task gave up; Codex
+// review 151 Minor 1). A manager that does not wait for a flush counts it as a stale input.
 void TxLoop::PostFlushedOnce() {
     if (side_ != LinkSide::kCtrl || flushed_posted_) return;
     if (queue_->e() != e_) return;  // an earlier pair's flush: not this link's one notice
@@ -58,7 +60,7 @@ bool TxLoop::RunOnce() {
     if (p_.stop_requested()) return false;
     std::optional<net::Elem> elem = queue_->Pop(net::kSliceUs);
     if (!elem) {
-        if (queue_->FlushDone()) PostFlushedOnce();
+        if (queue_->FlushDoneFor(e_)) PostFlushedOnce();
         if (queue_->Drained()) p_.idle(kIdleUs);  // closed and empty: Pop would not wait
         return true;
     }
@@ -116,18 +118,18 @@ bool TxLoop::RunOnce() {
         case net::SendResult::kOk:
             stats_.sent++;
             if (ready && side_ == LinkSide::kCtrl) p_.post(Notice(InKind::kReadySent, elem->e));
-            if (queue_->FlushDone()) PostFlushedOnce();
+            if (queue_->FlushDoneFor(e_)) PostFlushedOnce();
             return true;
         case net::SendResult::kDeadline:
             stats_.f2++;
             p_.stop_for_death(elem->e, EndReason::kF2);  // the sound stops now (design §4.1)
             End(elem->e, EndReason::kF2);                // and the pair ends even if not bound
-            if (queue_->Flushing()) PostFlushedOnce();
+            PostFlushedOnce();
             return false;
         case net::SendResult::kError:
             stats_.errors++;
             End(elem->e, side_ == LinkSide::kAudio ? EndReason::kAudioClosed : EndReason::kCtrlClosed);
-            if (queue_->Flushing()) PostFlushedOnce();
+            PostFlushedOnce();
             return false;
         case net::SendResult::kStopped:
             return false;

@@ -150,6 +150,11 @@ bool SendQueue::FlushDone() const {
     return flushing_ && items_.empty();
 }
 
+bool SendQueue::FlushDoneFor(uint64_t e) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return flushing_ && items_.empty() && e_ == e;
+}
+
 QueueStats SendQueue::Stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return stats_;

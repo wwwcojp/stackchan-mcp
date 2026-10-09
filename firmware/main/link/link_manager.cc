@@ -60,7 +60,10 @@ void LinkManager::RunOnce() {
 }
 
 void LinkManager::Run(const StepResult& r) {
+    if (r.state.ended_pairs != s_.ended_pairs) ends_[static_cast<size_t>(r.state.reason)].fetch_add(1);
     s_ = r.state;
+    stale_inputs_.store(s_.stale_inputs);
+    duplicate_ends_.store(s_.duplicate_ends);
     for (const Output& o : r.out) {
         switch (o.kind) {
             case OutKind::kConnectAudio:
@@ -91,11 +94,13 @@ void LinkManager::Run(const StepResult& r) {
     }
 }
 
-bool LinkPhase::OnEnded(Side side) {
+bool LinkPhase::OnEnded(Side side, EndReason reason) {
     // a side that left its end to the worker counts it as posted: at most one end per side
     // (two per link) reaches the manager's queue, whoever posts it (§3.8)
     std::atomic<bool>& posted = side == Side::kRx ? rx_posted_ : tx_posted_;
     if (posted.exchange(true)) return false;
+    EndReason none = EndReason::kNone;  // kept before the phase moves: the worker reads it after
+    first_reason_.compare_exchange_strong(none, reason);
     uint8_t p = kBeforeResult;
     if (phase_.compare_exchange_strong(p, kEndedBeforeResult)) return false;  // left to the worker
     if (p == kEndedBeforeResult) return false;  // the other side already left it to the worker
@@ -103,5 +108,10 @@ bool LinkPhase::OnEnded(Side side) {
 }
 
 bool LinkPhase::OnResultPosted() { return phase_.exchange(kAfterResult) == kEndedBeforeResult; }
+
+EndReason LinkPhase::EndReasonOr(EndReason fallback) const {
+    const EndReason r = first_reason_.load();
+    return r != EndReason::kNone ? r : fallback;
+}
 
 }  // namespace stackchan::link

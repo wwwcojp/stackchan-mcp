@@ -41,6 +41,11 @@ struct RxPorts {
     std::function<void(uint64_t e, const std::string& req_id)> stat;
 };
 
+// The name of the first empty app port (hello_reply, server_audio, app_json, stat: the ones the
+// application gives LinkHub), or nullptr. An empty std::function would abort on the first message
+// (Claude review 152 Minor 3): LinkHub::Start refuses to start with one.
+const char* MissingAppPort(const RxPorts& p);
+
 struct RxStats {
     uint32_t frames = 0;
     uint32_t dropped = 0;      // routed to kDrop, or a binary frame on the control link

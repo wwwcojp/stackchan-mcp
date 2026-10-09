@@ -7,6 +7,7 @@
 // ports are the real world in plan 2B, fakes in the host tests.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -20,6 +21,7 @@ namespace stackchan::link {
 
 constexpr int64_t kTickUs = 100'000;
 constexpr size_t kNoticeQueueLen = 32;  // one attempt's notices (17) + Shutdown + room (§3.8)
+constexpr size_t kEndReasonCount = static_cast<size_t>(EndReason::kShutdown) + 1;
 
 class NoticeQueue {
 public:
@@ -73,6 +75,11 @@ public:
     // One turn of the manager task (the task calls it forever).
     void RunOnce();
     State state() const { return s_; }
+    // The pairs ended, by reason (contract §5.1 stat). Any task may read it.
+    uint32_t ends(EndReason reason) const { return ends_[static_cast<size_t>(reason)].load(); }
+    // The transition function's stale inputs and duplicate end requests (design §6.2), copied for stat
+    uint32_t stale_inputs() const { return stale_inputs_.load(); }
+    uint32_t duplicate_ends() const { return duplicate_ends_.load(); }
     uint32_t ticks() const { return ticks_; }
     bool restarted() const { return restarted_; }
 
@@ -85,6 +92,8 @@ private:
     int64_t next_tick_us_ = 0;
     uint32_t ticks_ = 0;
     bool restarted_ = false;  // a host test sees Restart return; ESP never comes back
+    std::array<std::atomic<uint32_t>, kEndReasonCount> ends_{};
+    std::atomic<uint32_t> stale_inputs_{0}, duplicate_ends_{0};
 };
 
 // One link's (audio or control) phases around its connect result (design §3.8, v10): the
@@ -95,17 +104,23 @@ class LinkPhase {
 public:
     enum class Side { kRx, kTx };
     // A receive / send task found the link ended. True: post the EndRequest now.
-    bool OnEnded(Side side);
+    // `reason` is kept when it is the first end of the link (the worker posts it after the result).
+    // Every caller names its reason (no default: the first reason is never kNone by mistake).
+    bool OnEnded(Side side, EndReason reason);
     // The worker posted the successful connect result. True: post the EndRequest for an end
     // seen before the result.
     bool OnResultPosted();
     // The hello reply of this link is reported once (§3.8); later hellos are logged and dropped.
     bool TakeHelloReply() { return !hello_.exchange(true); }
+    // The worker's end request: the first reason a task saw before the result, or `fallback`
+    // (Claude review 152 Minor 1: a close of the gateway, a full queue or F2 is not lost as "closed").
+    EndReason EndReasonOr(EndReason fallback) const;
 
 private:
     enum : uint8_t { kBeforeResult, kEndedBeforeResult, kAfterResult };
     std::atomic<uint8_t> phase_{kBeforeResult};
     std::atomic<bool> rx_posted_{false}, tx_posted_{false}, hello_{false};
+    std::atomic<EndReason> first_reason_{EndReason::kNone};
 };
 
 }  // namespace stackchan::link

@@ -191,3 +191,21 @@ TEST(SendQueue, FlushDoneOnlyAfterAFlush) {
     r.Open(8);
     EXPECT_FALSE(r.FlushDone());
 }
+
+// Codex review 153 Minor 1: the flush is checked against the pair in one lock section
+TEST(SendQueue, FlushDoneForIsThePairsOwn) {
+    constexpr uint64_t E1 = 3, E2 = 4;
+    SendQueue q(kCtrlLimits);
+    q.Open(E1);
+    ASSERT_EQ(q.Push(E1, ElemKind::kJson, "{}", 0), PushResult::kQueued);
+    q.CloseForFlush();
+    EXPECT_FALSE(q.FlushDoneFor(E1));  // the done is still queued
+    ASSERT_TRUE(q.Pop(0).has_value());
+    EXPECT_TRUE(q.FlushDoneFor(E1));
+    EXPECT_FALSE(q.FlushDoneFor(E2));  // the next pair's link never takes it for its own
+    q.Open(E2);
+    EXPECT_FALSE(q.FlushDoneFor(E2));  // open: no flush
+    EXPECT_FALSE(q.FlushDoneFor(E1));
+    q.CloseForFlush();
+    EXPECT_TRUE(q.FlushDoneFor(E2));
+}

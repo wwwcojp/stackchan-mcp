@@ -236,4 +236,36 @@ TEST(RxLink, BeforeTheResultTheWorkerPostsTheEnd) {
     rx.OnDisconnected();
     EXPECT_TRUE(rig.posted.empty());
     EXPECT_TRUE(rig.phase.OnResultPosted());
+    EXPECT_EQ(rig.phase.EndReasonOr(EndReason::kNone), EndReason::kAudioClosed);
+}
+
+// The gateway's close before the result: the worker's end request says so (Claude review 152 Minor 1)
+TEST(RxLink, AServerCloseBeforeTheResultKeepsItsReason) {
+    Rig rig;
+    RxLink rx(LinkSide::kCtrl, 4, E, "s1", 1, &rig.phase, rig.Ports());
+    Feed(rx, Frame(0x88, ""));
+    EXPECT_TRUE(rig.posted.empty());
+    EXPECT_TRUE(rig.phase.OnResultPosted());
+    EXPECT_EQ(rig.phase.EndReasonOr(EndReason::kCtrlClosed), EndReason::kServerClose);
+}
+
+// Claude review 152 Minor 3: LinkHub refuses an app port left empty
+TEST(RxLink, MissingAppPortsAreNamed) {
+    Rig rig;
+    RxPorts p = rig.Ports();
+    EXPECT_EQ(MissingAppPort(p), nullptr);
+    p.received = nullptr;  // the link fills it, not the app
+    EXPECT_EQ(MissingAppPort(p), nullptr);
+    const std::vector<std::pair<std::string, void (*)(RxPorts&)>> cases = {
+        {"hello_reply", [](RxPorts& x) { x.hello_reply = nullptr; }},
+        {"server_audio", [](RxPorts& x) { x.server_audio = nullptr; }},
+        {"app_json", [](RxPorts& x) { x.app_json = nullptr; }},
+        {"stat", [](RxPorts& x) { x.stat = nullptr; }},
+    };
+    for (const auto& [name, clear] : cases) {
+        RxPorts q = rig.Ports();
+        clear(q);
+        ASSERT_NE(MissingAppPort(q), nullptr) << name;
+        EXPECT_EQ(std::string(MissingAppPort(q)), name);
+    }
 }
