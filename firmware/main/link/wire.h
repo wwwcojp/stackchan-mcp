@@ -108,7 +108,9 @@ struct StatGroup {
     const char* name;
     std::vector<StatItem> items;
 };
-cJSON* BuildStatReply(const std::string& req_id, const std::vector<StatGroup>& groups);
+// `build` (the build's mark, contract §5.1) is a top-level string when not empty.
+cJSON* BuildStatReply(const std::string& req_id, const std::vector<StatGroup>& groups,
+                      const std::string& build = "");
 
 // ---- fw_epoch / seq (contract S8, FW-A §2.2) ----
 

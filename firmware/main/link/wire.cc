@@ -224,11 +224,13 @@ cJSON* BuildListenStop(const std::string& session_id) {
     return root;
 }
 
-cJSON* BuildStatReply(const std::string& req_id, const std::vector<StatGroup>& groups) {
+cJSON* BuildStatReply(const std::string& req_id, const std::vector<StatGroup>& groups,
+                      const std::string& build) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "stat");
     cJSON_AddStringToObject(root, "state", "done");
     cJSON_AddStringToObject(root, "req_id", req_id.c_str());
+    if (!build.empty()) cJSON_AddStringToObject(root, "build", build.c_str());
     for (const StatGroup& g : groups) {
         cJSON* obj = cJSON_AddObjectToObject(root, g.name);
         for (const StatItem& i : g.items) cJSON_AddNumberToObject(obj, i.name, static_cast<double>(i.value));

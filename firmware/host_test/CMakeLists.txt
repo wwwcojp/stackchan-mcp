@@ -243,3 +243,10 @@ add_executable(playback_wiring_test test_playback_wiring.cc ../main/gate/playbac
 target_include_directories(playback_wiring_test PRIVATE ../main ../main/audio ../main/gate ../main/net ../main/link ../main/ui)
 target_link_libraries(playback_wiring_test PRIVATE GTest::gtest_main playback_gate_core ui_controller_core cjson)
 add_test(NAME playback_wiring_test COMMAND playback_wiring_test)
+
+# StackChan FW-A2 plan 2B-2a: the stat reply's groups and names (contract §5.1, design §6.2)
+add_executable(stat_report_test test_stat_report.cc ../main/link/stat_report.cc ../main/link/wire.cc
+    ../main/audio/playback_book.cc ../main/audio/audio_origin.cc)
+target_include_directories(stat_report_test PRIVATE ../main ../main/audio ../main/gate ../main/net ../main/link ../main/ui)
+target_link_libraries(stat_report_test PRIVATE GTest::gtest_main cjson)
+add_test(NAME stat_report_test COMMAND stat_report_test)
