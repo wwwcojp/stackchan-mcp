@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "link_manager_core.h"
@@ -113,6 +114,9 @@ public:
     State Snapshot() const;
     GateStats Stats() const;
     std::string session_id() const;
+    // The pair E's session while E is bound and alive, else nothing (one lock section). What the
+    // device sends on its own takes its session here, never another pair's (design §4.1).
+    std::optional<std::string> SessionFor(uint64_t e) const;
 
 private:
     void ApplyLocked(uint64_t e, const State& before, const Result& r, uint32_t* cleared);

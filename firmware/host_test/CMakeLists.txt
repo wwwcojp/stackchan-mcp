@@ -260,3 +260,13 @@ target_include_directories(app_link_test PRIVATE ../main ../main/audio ../main/g
     ../components/78__esp-ml307/include)
 target_link_libraries(app_link_test PRIVATE GTest::gtest_main playback_gate_core cjson)
 add_test(NAME app_link_test COMMAND app_link_test)
+
+# StackChan FW-A2 plan 2B-2b: what the device sends on its own (design §4.1, plan 2B-2a handoff 7)
+add_executable(outbound_test test_outbound.cc ../main/link/outbound.cc ../main/link/tx_loop.cc
+    ../main/link/link_manager.cc ../main/link/link_manager_core.cc ../main/link/wire.cc
+    ../main/gate/playback_gate.cc ../main/net/send_queue.cc ../main/net/send_deadline.cc
+    ../main/audio/playback_book.cc ../main/audio/audio_origin.cc ../components/78__esp-ml307/src/ws_frame.cc)
+target_include_directories(outbound_test PRIVATE ../main ../main/audio ../main/gate ../main/net ../main/link ../main/ui
+    ../components/78__esp-ml307/include)
+target_link_libraries(outbound_test PRIVATE GTest::gtest_main playback_gate_core cjson)
+add_test(NAME outbound_test COMMAND outbound_test)

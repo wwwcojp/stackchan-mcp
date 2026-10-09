@@ -254,4 +254,10 @@ std::string PlaybackGate::session_id() const {
     return session_;
 }
 
+std::optional<std::string> PlaybackGate::SessionFor(uint64_t e) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (e == 0 || s_.bound_e != e || s_.dead) return std::nullopt;
+    return session_;
+}
+
 }  // namespace stackchan::gate

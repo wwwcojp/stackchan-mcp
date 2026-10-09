@@ -119,6 +119,9 @@ l::StatInputs Fill(Expected* x) {
     set(in.app.unknown, "app.unknown");
     set(in.app.stat_full, "app.stat_full");
     set(in.app.stat_closed, "app.stat_closed");
+    set(in.app.out_unbound, "app.out_unbound");
+    set(in.app.out_closed, "app.out_closed");
+    set(in.app.out_bad_json, "app.out_bad_json");
     set(in.ui.stale, "ui.stale_ui");
     set(in.ui.dropped_input, "ui.dropped_input");
     set(in.ui.dropped_resync, "ui.dropped_resync");

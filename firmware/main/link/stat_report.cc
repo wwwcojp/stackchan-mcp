@@ -109,7 +109,10 @@ std::vector<wire::StatGroup> BuildStatGroups(const StatInputs& in) {
                    {{"mcp_unbound", in.app.mcp_unbound},
                     {"unknown", in.app.unknown},
                     {"stat_full", in.app.stat_full},
-                    {"stat_closed", in.app.stat_closed}}});
+                    {"stat_closed", in.app.stat_closed},
+                    {"out_unbound", in.app.out_unbound},
+                    {"out_closed", in.app.out_closed},
+                    {"out_bad_json", in.app.out_bad_json}}});
     // design §2.2, §2.4, §6.2: what came for another pair, or while not in a conversation
     out.push_back({"ui",
                    {{"stale_gate", g.stale},

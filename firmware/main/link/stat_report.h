@@ -40,6 +40,10 @@ struct AppStats {
     uint32_t unknown = 0;       // an unknown type, or a known one without its fields
     uint32_t stat_full = 0;     // a stat reply that did not fit the control queue (the pair ends)
     uint32_t stat_closed = 0;   // a stat reply for a pair that already ended
+    // what the device sends on its own (link/outbound: MCP replies, stackchan-event, SendJsonString)
+    uint32_t out_unbound = 0;   // no bound live pair (or the request's pair ended): dropped
+    uint32_t out_closed = 0;    // the audio send queue was closed for it
+    uint32_t out_bad_json = 0;  // not a JSON object
 };
 
 // The smallest free stack seen (bytes) per task kind; 0 when not measured yet
