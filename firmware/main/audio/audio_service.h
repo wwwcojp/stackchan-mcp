@@ -26,6 +26,8 @@
 #include "wake_word.h"
 #include "protocol.h"
 #include "ogg_demuxer.h"
+#include "audio_items.h"
+#include "audio_pipeline.h"
 
 /*
  * There are two types of audio data flow:
@@ -83,26 +85,12 @@ struct AudioServiceCallbacks {
     std::function<void(const std::string&)> on_wake_word_detected;
     std::function<void(bool)> on_vad_change;
     std::function<void(void)> on_audio_testing_queue_full;
+    // StackChan FW-A2 (design §2.4, AutoStop): no server audio is in flight any more after a
+    // RequestPlaybackDrain(). Called under audio_queue_mutex_: only post (UiController::Post).
+    std::function<void(void)> on_playback_drained;
 };
 
-
-enum AudioTaskType {
-    kAudioTaskTypeEncodeToSendQueue,
-    kAudioTaskTypeEncodeToTestingQueue,
-    kAudioTaskTypeDecodeToPlaybackQueue,
-};
-
-struct RawCaptureFrame {
-    std::vector<int16_t> pcm;
-};
-
-struct AudioTask {
-    AudioTaskType type;
-    std::vector<int16_t> pcm;
-    std::unique_ptr<RawCaptureFrame> raw_capture_frame;
-    uint32_t timestamp = 0;
-    uint32_t raw_capture_generation = 0;
-};
+// AudioTaskType, RawCaptureFrame and AudioTask: audio_items.h (StackChan FW-A2)
 
 struct DebugStatistics {
     uint32_t input_count = 0;
@@ -155,6 +143,22 @@ public:
     uint32_t ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
 
+    // StackChan FW-A2 (plan 2B-2a; design §2.2, §2.4, §6.1). Built in, not called until plan 2B-2b
+    // switches the application over (FW-A's AcceptServerAudio / ResetDecoder path stays until then).
+    // The gate's AudioSink: a stop clears only when server audio accepted since the previous stop
+    // is still unwritten; ClearForListening and the start from Idle clear unconditionally.
+    stackchan::gate::AudioSink* playback_sink() { return &playback_sink_; }
+    // The gate's R4 push: the decode queue takes the server packet or not (full: counted, the
+    // packet stays with the caller). Never waits.
+    bool PushServerAudio(std::unique_ptr<AudioStreamPacket>& packet);
+    // AutoStop: on_playback_drained once no server audio is in flight (at once if none is).
+    void RequestPlaybackDrain();
+    // The popup at the start of listening: never waits; false when a packet did not fit (counted).
+    bool PlaySoundNoWait(const std::string_view& sound);
+    // stat (contract §5.1, design §6.1-6.2)
+    stackchan::audio::PlaybackBook PlaybackBookSnapshot();
+    stackchan::audio::PipelineStats PlaybackStats();
+
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
@@ -187,12 +191,19 @@ private:
     TaskHandle_t opus_codec_task_handle_ = nullptr;
     std::mutex audio_queue_mutex_;
     std::condition_variable audio_queue_cv_;
-    std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_send_queue_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
-    std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
-    std::atomic<uint32_t> playback_generation_{0};  // StackChan FW-A: bumped by ResetDecoder()
+    // StackChan FW-A2: the decode and playback queues and the book (one generation, bumped by
+    // every clear), under audio_queue_mutex_
+    stackchan::audio::AudioPipeline pipeline_{
+        stackchan::audio::PipelineLimits{MAX_DECODE_PACKETS_IN_QUEUE, MAX_PLAYBACK_TASKS_IN_QUEUE},
+        [this]() {
+            if (callbacks_.on_playback_drained) callbacks_.on_playback_drained();
+        },
+        [this]() { ResetDecoderStateLocked(); }};
+    stackchan::audio::PipelineSink playback_sink_{&audio_queue_mutex_, &pipeline_,
+                                                  [this]() { audio_queue_cv_.notify_all(); }};
     bool accept_server_audio_ = false;              // guarded by audio_queue_mutex_
     uint32_t server_audio_rejected_ = 0;            // diagnostic; not part of abort dropped_ms
     std::mutex raw_capture_mutex_;
@@ -226,6 +237,10 @@ private:
     void ResetRawCaptureBuffer();
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
+    // Every clear of the pipeline, under audio_queue_mutex_: the opus decoder's state, the
+    // server-AEC timestamps and the testing queue (what ResetDecoder cleared besides the queues)
+    void ResetDecoderStateLocked();
+    void PlaySoundImpl(const std::string_view& sound, bool wait, bool* all_queued);
     void CheckAndUpdateAudioPowerState();
 };
 

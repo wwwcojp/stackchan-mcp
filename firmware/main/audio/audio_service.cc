@@ -186,10 +186,9 @@ void AudioService::Stop() {
     raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
     ReleaseRawCaptureStorage();
 
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     audio_encode_queue_.clear();
-    audio_decode_queue_.clear();
-    audio_playback_queue_.clear();
+    pipeline_.Reset(lock);  // StackChan FW-A2: the decode and playback queues, counted by the book
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
 }
@@ -481,14 +480,12 @@ void AudioService::ReturnRawCaptureFrame(std::unique_ptr<RawCaptureFrame> frame,
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+        audio_queue_cv_.wait(lock, [this, &lock]() { return pipeline_.CanOutput(lock) || service_stopped_; });
         if (service_stopped_) {
             break;
         }
 
-        auto task = std::move(audio_playback_queue_.front());
-        audio_playback_queue_.pop_front();
-        const uint32_t output_generation = playback_generation_.load();
+        auto item = pipeline_.TakeForOutput(lock);
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -498,20 +495,22 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
 
-        if (output_generation != playback_generation_.load()) {
-            continue;  // StackChan FW-A: ResetDecoder() ran after this task was popped
+        // StackChan FW-A2 (design §6.1): the generation check and the write-start mark in one
+        // section right before OutputData(), the write end under the lock again (the pipeline's
+        // one-item step); false: a clear ran after this task was popped
+        lock.lock();
+        if (!pipeline_.OutputOne(lock, item, [this](AudioTask& task) {
+                codec_->OutputData(task.pcm);
+                /* Update the last output time */
+                last_output_time_ = std::chrono::steady_clock::now();
+                debug_statistics_.playback_count++;
+            })) {
+            continue;
         }
-        codec_->OutputData(task->pcm);
-
-        /* Update the last output time */
-        last_output_time_ = std::chrono::steady_clock::now();
-        debug_statistics_.playback_count++;
-
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
-        if (task->timestamp > 0) {
-            lock.lock();
-            timestamp_queue_.push_back(task->timestamp);
+        if (item.task->timestamp > 0) {
+            timestamp_queue_.push_back(item.task->timestamp);
         }
 #endif
     }
@@ -522,33 +521,35 @@ void AudioService::AudioOutputTask() {
 void AudioService::OpusCodecTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() {
+        audio_queue_cv_.wait(lock, [this, &lock]() {
             return service_stopped_ ||
                 (!audio_encode_queue_.empty() && audio_send_queue_.size() < MAX_SEND_PACKETS_IN_QUEUE) ||
-                (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE);
+                pipeline_.CanDecode(lock);
         });
         if (service_stopped_) {
             break;
         }
 
         /* Decode the audio from decode queue */
-        if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
-            auto packet = std::move(audio_decode_queue_.front());
-            audio_decode_queue_.pop_front();
-            const uint32_t decode_generation = playback_generation_.load();
+        if (pipeline_.CanDecode(lock)) {
+            auto item = pipeline_.TakeForDecode(lock);  // StackChan FW-A2: with its generation
             audio_queue_cv_.notify_all();
-            lock.unlock();
+            // StackChan FW-A2: decoded without the lock, then queued (dropped if a clear ran
+            // meanwhile) or told as a failure under it again (the pipeline's one-item step)
+            pipeline_.DecodeOne(lock, item, [this](const AudioStreamPacket& packet) -> std::unique_ptr<AudioTask> {
+                auto task = std::make_unique<AudioTask>();
+                task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+                task->timestamp = packet.timestamp;
 
-            auto task = std::make_unique<AudioTask>();
-            task->type = kAudioTaskTypeDecodeToPlaybackQueue;
-            task->timestamp = packet->timestamp;
-
-            SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
-            if (opus_decoder_ != nullptr) {
+                SetDecodeSampleRate(packet.sample_rate, packet.frame_duration);
+                if (opus_decoder_ == nullptr) {
+                    ESP_LOGE(TAG, "Audio decoder is not configured");
+                    return nullptr;
+                }
                 task->pcm.resize(decoder_frame_size_);
                 esp_audio_dec_in_raw_t raw = {
-                    .buffer = (uint8_t *)(packet->payload.data()),
-                    .len = (uint32_t)(packet->payload.size()),
+                    .buffer = (uint8_t *)(packet.payload.data()),
+                    .len = (uint32_t)(packet.payload.size()),
                     .consumed = 0,
                     .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
                 };
@@ -561,33 +562,25 @@ void AudioService::OpusCodecTask() {
                 std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
                 auto ret = esp_opus_dec_decode(opus_decoder_, &raw, &out_frame, &dec_info);
                 decoder_lock.unlock();
-                if (ret == ESP_AUDIO_ERR_OK) {
-                    task->pcm.resize(out_frame.decoded_size / sizeof(int16_t));
-                    if (decoder_sample_rate_ != codec_->output_sample_rate() && output_resampler_ != nullptr) {
-                        uint32_t target_size = 0;
-                        esp_ae_rate_cvt_get_max_out_sample_num(output_resampler_, task->pcm.size(), &target_size);
-                        std::vector<int16_t> resampled(target_size);
-                        uint32_t actual_output = target_size;
-                        esp_ae_rate_cvt_process(output_resampler_, (esp_ae_sample_t)task->pcm.data(), task->pcm.size(),
-                                                (esp_ae_sample_t)resampled.data(), &actual_output);
-                        resampled.resize(actual_output);
-                        task->pcm = std::move(resampled);
-                    }
-                    lock.lock();
-                    if (decode_generation == playback_generation_.load()) {
-                        audio_playback_queue_.push_back(std::move(task));
-                    }  // else: StackChan FW-A, ResetDecoder() ran while decoding; drop it
-                    audio_queue_cv_.notify_all();
-                    debug_statistics_.decode_count++;
-                } else {
+                if (ret != ESP_AUDIO_ERR_OK) {
                     ESP_LOGE(TAG, "Failed to decode audio after resize, error code: %d", ret);
-                    lock.lock();
+                    return nullptr;
                 }
-            } else {
-                ESP_LOGE(TAG, "Audio decoder is not configured");
-                lock.lock();
-            }
-            debug_statistics_.decode_count++;
+                task->pcm.resize(out_frame.decoded_size / sizeof(int16_t));
+                if (decoder_sample_rate_ != codec_->output_sample_rate() && output_resampler_ != nullptr) {
+                    uint32_t target_size = 0;
+                    esp_ae_rate_cvt_get_max_out_sample_num(output_resampler_, task->pcm.size(), &target_size);
+                    std::vector<int16_t> resampled(target_size);
+                    uint32_t actual_output = target_size;
+                    esp_ae_rate_cvt_process(output_resampler_, (esp_ae_sample_t)task->pcm.data(), task->pcm.size(),
+                                            (esp_ae_sample_t)resampled.data(), &actual_output);
+                    resampled.resize(actual_output);
+                    task->pcm = std::move(resampled);
+                }
+                return task;
+            });
+            audio_queue_cv_.notify_all();
+            debug_statistics_.decode_count++;  // StackChan FW-A2: once per packet (it was twice)
         }
         /* Encode the audio to send queue */
         if (!audio_encode_queue_.empty() && audio_send_queue_.size() < MAX_SEND_PACKETS_IN_QUEUE) {
@@ -672,11 +665,17 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
     }
     decoder_lock.unlock();
     esp_opus_dec_cfg_t opus_dec_cfg = OPUS_DEC_CFG(sample_rate, frame_duration);
-    auto ret = esp_opus_dec_open(&opus_dec_cfg, sizeof(esp_opus_dec_cfg_t), &opus_decoder_);
-    if (opus_decoder_ == nullptr) {
+    // StackChan FW-A2 (design §1.2): opened outside the lock, published under it (a stop resets
+    // the decoder from another task)
+    void* decoder = nullptr;
+    auto ret = esp_opus_dec_open(&opus_dec_cfg, sizeof(esp_opus_dec_cfg_t), &decoder);
+    if (decoder == nullptr) {
         ESP_LOGE(TAG, "Failed to create audio decoder, error code: %d", ret);
         return;
     }
+    decoder_lock.lock();
+    opus_decoder_ = decoder;
+    decoder_lock.unlock();
     decoder_sample_rate_ = sample_rate;
     decoder_duration_ms_ = frame_duration;
     decoder_frame_size_ = decoder_sample_rate_ / 1000 * frame_duration;
@@ -722,14 +721,13 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
-        if (wait) {
-            audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
-        } else {
-            return false;
-        }
+    if (wait) {
+        audio_queue_cv_.wait(lock, [this, &lock]() { return !pipeline_.DecodeQueueFull(lock); });
     }
-    audio_decode_queue_.push_back(std::move(packet));
+    // StackChan FW-A2: a local sound (the local origin; a full queue is counted)
+    if (!pipeline_.PushLocal(lock, packet)) {
+        return false;
+    }
     audio_queue_cv_.notify_all();
     return true;
 }
@@ -740,12 +738,35 @@ bool AudioService::PushServerPacketToDecodeQueue(std::unique_ptr<AudioStreamPack
         server_audio_rejected_++;
         return false;
     }
-    if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
+    if (!pipeline_.PushServer(lock, packet)) {  // StackChan FW-A2: counted by the book only when queued
         return false;
     }
-    audio_decode_queue_.push_back(std::move(packet));
     audio_queue_cv_.notify_all();
     return true;
+}
+
+bool AudioService::PushServerAudio(std::unique_ptr<AudioStreamPacket>& packet) {
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    if (!pipeline_.PushServer(lock, packet)) {
+        return false;
+    }
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
+void AudioService::RequestPlaybackDrain() {
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    pipeline_.RequestDrain(lock);
+}
+
+stackchan::audio::PlaybackBook AudioService::PlaybackBookSnapshot() {
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    return pipeline_.book(lock);
+}
+
+stackchan::audio::PipelineStats AudioService::PlaybackStats() {
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    return pipeline_.stats(lock);
 }
 
 void AudioService::AcceptServerAudio(bool accept) {
@@ -888,9 +909,11 @@ void AudioService::EnableAudioTesting(bool enable) {
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING);
     } else {
         xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING);
-        /* Copy audio_testing_queue_ to audio_decode_queue_ */
-        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-        audio_decode_queue_ = std::move(audio_testing_queue_);
+        /* Copy audio_testing_queue_ to audio_decode_queue_ (StackChan FW-A2: as local sounds) */
+        std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+        auto recorded = std::move(audio_testing_queue_);
+        audio_testing_queue_.clear();
+        pipeline_.ReplaceDecodeQueue(lock, std::move(recorded));
         audio_queue_cv_.notify_all();
     }
 }
@@ -910,6 +933,16 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
 }
 
 void AudioService::PlaySound(const std::string_view& ogg) {
+    PlaySoundImpl(ogg, true, nullptr);
+}
+
+bool AudioService::PlaySoundNoWait(const std::string_view& ogg) {
+    bool all_queued = true;
+    PlaySoundImpl(ogg, false, &all_queued);
+    return all_queued;
+}
+
+void AudioService::PlaySoundImpl(const std::string_view& ogg, bool wait, bool* all_queued) {
     if (!codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
@@ -920,46 +953,49 @@ void AudioService::PlaySound(const std::string_view& ogg) {
     size_t size = ogg.size();
 
     auto demuxer = std::make_unique<OggDemuxer>();
-    demuxer->OnDemuxerFinished([this](const uint8_t* data, int sample_rate, size_t size){
+    demuxer->OnDemuxerFinished([this, wait, all_queued](const uint8_t* data, int sample_rate, size_t size){
         auto packet = std::make_unique<AudioStreamPacket>();
         packet->sample_rate = sample_rate;
         packet->frame_duration = 60;
         packet->payload.resize(size);
         std::memcpy(packet->payload.data(), data, size);
-        PushPacketToDecodeQueue(std::move(packet), true);
+        if (!PushPacketToDecodeQueue(std::move(packet), wait) && all_queued != nullptr) {
+            *all_queued = false;  // StackChan FW-A2: the popup that never waits (counted by the pipeline)
+        }
     });
     demuxer->Reset();
     demuxer->Process(buf, size);
 }
 
 bool AudioService::IsIdle() {
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    return audio_encode_queue_.empty() && pipeline_.Empty(lock) && audio_testing_queue_.empty();
 }
 
 void AudioService::WaitForPlaybackQueueEmpty() {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    audio_queue_cv_.wait(lock, [this]() { 
-        return service_stopped_ || (audio_decode_queue_.empty() && audio_playback_queue_.empty()); 
+    audio_queue_cv_.wait(lock, [this, &lock]() {
+        return service_stopped_ || pipeline_.Empty(lock);
     });
 }
 
 uint32_t AudioService::ResetDecoder() {
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    const uint32_t cleared = static_cast<uint32_t>(audio_decode_queue_.size() + audio_playback_queue_.size());
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     accept_server_audio_ = false;
-    playback_generation_.fetch_add(1);
+    // StackChan FW-A2: the pipeline bumps the one generation and calls ResetDecoderStateLocked
+    const uint32_t cleared = pipeline_.Reset(lock);
+    audio_queue_cv_.notify_all();
+    return cleared;
+}
+
+void AudioService::ResetDecoderStateLocked() {
     std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
     if (opus_decoder_ != nullptr) {
         esp_opus_dec_reset(opus_decoder_);
     }
     decoder_lock.unlock();
     timestamp_queue_.clear();
-    audio_decode_queue_.clear();
-    audio_playback_queue_.clear();
     audio_testing_queue_.clear();
-    audio_queue_cv_.notify_all();
-    return cleared;
 }
 
 void AudioService::CheckAndUpdateAudioPowerState() {

@@ -1033,6 +1033,7 @@ endif()
 list(APPEND SOURCES
     "audio/audio_origin.cc"
     "audio/playback_book.cc"
+    "audio/audio_pipeline.cc"
     "gate/playback_gate_core.cc"
     "gate/playback_gate.cc"
     "ui/ui_controller_core.cc"
