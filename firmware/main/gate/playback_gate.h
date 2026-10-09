@@ -59,12 +59,29 @@ struct TouchResult {
     uint32_t rev = 0;
 };
 
+// The gate's counts for stat (contract §5.1, design §2.2, §6.2; plan 2B-2a)
 struct GateStats {
     uint32_t stops = 0;              // the stop processing ran (any trigger)
+    uint32_t stop_abort = 0;         // R1.3
+    uint32_t stop_tts_start = 0;     // R2.4: a tts start with a newer aborted_gen
+    uint32_t stop_touch = 0;         // R5
+    uint32_t stop_violation = 0;     // R1.2, R2.2, R2.2b (the pair ends)
+    uint32_t stop_f1 = 0;            // StopForDeath(F1)
+    uint32_t stop_f2 = 0;            // StopForDeath(F2)
+    uint32_t stop_closed = 0;        // StopForDeath: a link closed (either side, or the gateway's close)
+    uint32_t stop_other_death = 0;   // StopForDeath: a full queue, a hello / S6 deadline, ...
+    uint32_t stop_unbind = 0;        // K2
+    uint32_t already = 0;            // R1.1
+    uint32_t rejected_start = 0;     // R2.1, R2.3, R2.6
+    uint32_t ignored_stop = 0;       // R3: not the current generation
+    uint32_t v_abort = 0;            // R1.2: aborted_gen < g < current_gen
+    uint32_t v_k_ahead = 0;          // R2.2: K above dev_abort_seq
+    uint32_t v_k_lowered = 0;        // R2.2b: K below the largest K seen
     uint32_t dropped_server = 0;     // server audio the gate refused (R4) or the queue was full for
     uint32_t done_send_failed = 0;   // a done that did not fit the control queue
     uint32_t violations = 0;         // the pair ended by a contract violation
     uint32_t rejected_session = 0;   // an abort of another (or no) session: no stop, no done
+    uint32_t stale = 0;              // an entry for another pair, before any pair or a dead one (§2.2)
 };
 
 class PlaybackGate {
@@ -99,6 +116,7 @@ public:
 
 private:
     void ApplyLocked(uint64_t e, const State& before, const Result& r, uint32_t* cleared);
+    void CountLocked(const Result& r);
     void StopForDeathLocked(uint64_t e, link::EndReason reason);
     void EndViolationLocked(uint64_t e, bool flush);
     static std::string Take(cJSON* root);

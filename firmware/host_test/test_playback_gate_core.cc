@@ -147,3 +147,18 @@ TEST(PlaybackGateCore, EpochAbove32BitsIsKeptWhole) {
     EXPECT_EQ(g::OnTouch(r.state, e2 & 0xFFFFFFFFull).outcome, g::Outcome::kStale);
     EXPECT_EQ(g::Unbind(r.state, e2).state.last_ended_e, e2);
 }
+
+// Plan 1 follow-up 1 (contract §4 "死んだとみなしたとき", R1.2): a pair that ends has aborted its
+// current generation; stat reads it before the Unbind.
+TEST(PlaybackGateCore, AnEndingPairAbortsItsCurrentGeneration) {
+    const g::State s = g::OnTtsStart(Playing(1, 3), 1, 5, 2, 0).state;
+    ASSERT_EQ(s.current_gen, 5u);
+    ASSERT_EQ(s.aborted_gen, 2u);
+    EXPECT_EQ(g::StopForDeath(s, 1).state.aborted_gen, 5u);
+    EXPECT_EQ(g::OnAbort(s, 1, 4).state.aborted_gen, 5u);           // R1.2: 2 < 4 < 5
+    EXPECT_EQ(g::OnTtsStart(s, 1, 6, 2, 1).state.aborted_gen, 5u);  // R2.2: K above dev_abort_seq
+    const g::State t = g::OnAbort(s, 1, 7).state;                   // R1.3: aborted 7 > current 5
+    ASSERT_EQ(t.aborted_gen, 7u);
+    EXPECT_EQ(g::StopForDeath(t, 1).state.aborted_gen, 7u);         // the larger stays
+    EXPECT_EQ(g::OnTtsStart(t, 1, 8, 7, 3).state.aborted_gen, 7u);
+}

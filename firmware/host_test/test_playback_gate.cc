@@ -479,3 +479,148 @@ TEST(PlaybackGateShell, TheFlushIsNeverSeenBeforeTheEndRequest) {
     EXPECT_TRUE(rig.ctrl_q.FlushDone());  // after the end request: closed for the flush, empty
     EXPECT_EQ(rig.ctrl_q.Push(7, n::ElemKind::kJson, "late", 0), n::PushResult::kClosed);
 }
+
+// Plan 2A follow-up 1: GateChanged goes into the UI list before the AudioService's stop or clear
+// (a clear can post PlaybackDrained into the same list).
+TEST(PlaybackGateShell, GateChangedGoesBeforeTheAudioStopAndClear) {
+    struct OrderAudio : g::AudioSink {
+        std::vector<std::string>* log;
+        uint32_t Stop(uint32_t) override {
+            log->push_back("stop");
+            return 0;
+        }
+        void Clear() override { log->push_back("clear"); }
+    };
+    std::vector<std::string> log;
+    OrderAudio audio;
+    audio.log = &log;
+    n::SendQueue aq{n::kAudioLimits}, cq{n::kCtrlLimits};
+    g::GatePorts p;
+    p.audio = &audio;
+    p.audio_queue = &aq;
+    p.ctrl_queue = &cq;
+    p.now_us = [] { return int64_t{0}; };
+    p.post_gate_changed = [&](uint64_t, bool spk, uint32_t) { log.push_back(spk ? "changed on" : "changed off"); };
+    p.post_link_up = [](uint64_t, bool, uint32_t) {};
+    p.end_pair = [](uint64_t, EndReason, bool) {};
+    g::PlaybackGate gate(p);
+    aq.Open(7);
+    cq.Open(7);
+    ASSERT_EQ(gate.Bind(7, "sid"), g::Outcome::kBound);
+    gate.OnTtsStart(7, {1, 0, 0});  // the start from Idle clears
+    gate.OnTouch(7, w::ListenMode::kManualStop, w::DeviceAbortReason::kTouch);  // R5 stops
+    EXPECT_EQ(log, (std::vector<std::string>{"changed on", "clear", "changed off", "stop"}));
+}
+
+// stat: the gate counts by rule and trigger (contract §5.1, design §2.2, §6.2)
+TEST(PlaybackGateShell, CountsByRuleAndTrigger) {
+    Rig rig;
+    rig.Bind(7);
+    w::AbortRequest req;
+    req.req_id = "q";
+    req.session_id = "sid";
+    rig.gate->OnTtsStart(8, {1, 0, 0});  // another pair: stale
+    rig.gate->OnTtsStop(7, 1);           // not the current generation: ignored
+    rig.gate->OnTtsStart(7, {1, 0, 0});  // accepted, nothing stopped
+    rig.gate->OnTtsStart(7, {2, 1, 0});  // R2.4: a newer aborted_gen stops, then accepted
+    rig.gate->OnTtsStart(7, {1, 1, 0});  // R2.6: rejected
+    req.gen = 2;
+    EXPECT_EQ(rig.gate->OnAbort(7, req), g::Outcome::kStopped);  // R1.3
+    EXPECT_EQ(rig.gate->OnAbort(7, req), g::Outcome::kAlready);  // R1.1
+    rig.gate->OnTtsStart(7, {3, 2, 0});
+    rig.gate->OnTouch(7, w::ListenMode::kManualStop, w::DeviceAbortReason::kTouch);  // R5
+    rig.gate->StopForDeath(7, EndReason::kF1);
+    EXPECT_EQ(rig.gate->OnServerAudio(7, [] { return true; }), g::Outcome::kStale);  // dead
+    rig.gate->Unbind(7);                                   // K2
+    EXPECT_EQ(rig.gate->Bind(7, "sid"), g::Outcome::kStale);  // not newer than the ended pair
+    const g::GateStats s = rig.gate->Stats();
+    EXPECT_EQ(s.stale, 3u);
+    EXPECT_EQ(s.ignored_stop, 1u);
+    EXPECT_EQ(s.stop_tts_start, 1u);
+    EXPECT_EQ(s.rejected_start, 1u);
+    EXPECT_EQ(s.stop_abort, 1u);
+    EXPECT_EQ(s.already, 1u);
+    EXPECT_EQ(s.stop_touch, 1u);
+    EXPECT_EQ(s.stop_f1, 1u);
+    EXPECT_EQ(s.stop_unbind, 1u);
+    EXPECT_EQ(s.stops, 5u);
+    EXPECT_EQ(s.stop_f2 + s.stop_closed + s.stop_other_death + s.stop_violation, 0u);
+    EXPECT_EQ(s.v_abort + s.v_k_ahead + s.v_k_lowered, 0u);
+}
+
+TEST(PlaybackGateShell, DeathsAreCountedByTheirReason) {
+    const std::vector<std::tuple<EndReason, uint32_t g::GateStats::*>> cases = {
+        {EndReason::kF1, &g::GateStats::stop_f1},
+        {EndReason::kF2, &g::GateStats::stop_f2},
+        {EndReason::kAudioClosed, &g::GateStats::stop_closed},
+        {EndReason::kCtrlClosed, &g::GateStats::stop_closed},
+        {EndReason::kServerClose, &g::GateStats::stop_closed},
+        {EndReason::kQueueFull, &g::GateStats::stop_other_death},
+        {EndReason::kS6, &g::GateStats::stop_other_death},
+    };
+    for (const auto& [reason, field] : cases) {
+        Rig rig;
+        rig.Bind(7);
+        rig.gate->StopForDeath(7, reason);
+        const g::GateStats s = rig.gate->Stats();
+        EXPECT_EQ(s.*field, 1u) << static_cast<int>(reason);
+        EXPECT_EQ(s.stop_f1 + s.stop_f2 + s.stop_closed + s.stop_other_death, 1u) << static_cast<int>(reason);
+        EXPECT_EQ(s.stops, 1u);
+        rig.gate->StopForDeath(7, reason);  // dead already: stale, not a second stop
+        EXPECT_EQ(rig.gate->Stats().stale, 1u);
+        EXPECT_EQ(rig.gate->Stats().stops, 1u);
+    }
+}
+
+TEST(PlaybackGateShell, ViolationsAreCountedByRule) {
+    w::AbortRequest req;
+    req.req_id = "q";
+    req.session_id = "sid";
+    {
+        Rig rig;  // R1.2: aborted_gen < g < current_gen
+        rig.Bind(7);
+        rig.gate->OnTtsStart(7, {2, 0, 0});
+        req.gen = 1;
+        EXPECT_EQ(rig.gate->OnAbort(7, req), g::Outcome::kEnded);
+        EXPECT_EQ(rig.gate->Stats().v_abort, 1u);
+        EXPECT_EQ(rig.gate->Stats().stop_violation, 1u);
+        EXPECT_EQ(rig.gate->Stats().v_k_ahead + rig.gate->Stats().v_k_lowered, 0u);
+    }
+    {
+        Rig rig;  // R2.2: K above dev_abort_seq
+        rig.Bind(7);
+        EXPECT_EQ(rig.gate->OnTtsStart(7, {1, 0, 1}), g::Outcome::kEnded);
+        EXPECT_EQ(rig.gate->Stats().v_k_ahead, 1u);
+        EXPECT_EQ(rig.gate->Stats().v_abort + rig.gate->Stats().v_k_lowered, 0u);
+        EXPECT_EQ(rig.gate->Stats().stop_violation, 1u);
+        EXPECT_EQ(rig.gate->Stats().stop_tts_start, 0u);
+    }
+    {
+        Rig rig;  // R2.2b: K lowered
+        rig.Bind(7);
+        rig.gate->OnTtsStart(7, {1, 0, 0});
+        rig.gate->OnTouch(7, w::ListenMode::kManualStop, w::DeviceAbortReason::kTouch);
+        ASSERT_EQ(rig.gate->OnTtsStart(7, {2, 1, 1}), g::Outcome::kAccepted);
+        EXPECT_EQ(rig.gate->OnTtsStart(7, {3, 1, 0}), g::Outcome::kEnded);
+        EXPECT_EQ(rig.gate->Stats().v_k_lowered, 1u);
+        EXPECT_EQ(rig.gate->Stats().v_k_ahead + rig.gate->Stats().v_abort, 0u);
+    }
+}
+
+// Codex review 157 Minor 1: a touch with no pair the UI knows of, and a LinkUp for an unbound,
+// another or a dead pair, are stale calls too (design §2.2)
+TEST(PlaybackGateShell, TouchesAndLinkUpsForNoLivePairAreCountedStale) {
+    Rig rig;
+    rig.gate->OnTouch(0, w::ListenMode::kManualStop, w::DeviceAbortReason::kTouch);
+    EXPECT_EQ(rig.gate->Stats().stale, 1u);
+    EXPECT_FALSE(rig.gate->PostLinkUp(7));  // unbound
+    EXPECT_EQ(rig.gate->Stats().stale, 2u);
+    rig.Bind(7);
+    EXPECT_FALSE(rig.gate->PostLinkUp(8));  // another pair
+    EXPECT_EQ(rig.gate->Stats().stale, 3u);
+    EXPECT_TRUE(rig.gate->PostLinkUp(7));
+    EXPECT_EQ(rig.gate->Stats().stale, 3u);
+    rig.gate->StopForDeath(7, EndReason::kF1);
+    EXPECT_FALSE(rig.gate->PostLinkUp(7));  // dead
+    EXPECT_EQ(rig.gate->Stats().stale, 4u);
+}

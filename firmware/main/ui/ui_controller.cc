@@ -105,6 +105,11 @@ bool UiController::ProcessOne() {
         stats_.dropped_resync++;
         return true;
     }
+    if (s_.suspended &&
+        (ev.kind == EvKind::kTouch || ev.kind == EvKind::kWakeWord || ev.kind == EvKind::kToggle)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stats_.dropped_input++;
+    }
     if (NeedsGateDecision(s_, ev)) {  // the gate decides first, in one lock section
         const bool wake = ev.kind == EvKind::kWakeWord;
         const Mode mode = wake ? ev.mode : Mode::kManualStop;

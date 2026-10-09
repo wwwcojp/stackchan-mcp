@@ -3,6 +3,8 @@
 
 #include <cJSON.h>
 
+#include <cstring>
+
 namespace stackchan::gate {
 
 namespace {
@@ -19,17 +21,47 @@ std::string PlaybackGate::Take(cJSON* root) {
     return out;
 }
 
-// Apply a core result under the lock: the AudioService's stop / start, then the notices.
+// Apply a core result under the lock: the GateChanged notice first, then the AudioService's stop
+// / start. A clear can meet an AutoStop drain request and post PlaybackDrained; the UI must see the
+// new speaking state before it (plan 2A follow-up 1, Claude review 146 Minor 1: otherwise a new
+// playback's start opens the mic and plays the popup at its head).
 void PlaybackGate::ApplyLocked(uint64_t e, const State& before, const Result& r, uint32_t* cleared) {
+    s_ = r.state;
+    if (s_.rev != before.rev) p_.post_gate_changed(e, s_.speaking, s_.rev);
     uint32_t n = 0;
     if (r.stopped) {
         n = p_.audio->Stop(r.state.stop_serial);
         stats_.stops++;
     }
     if (r.outcome == Outcome::kAccepted && r.start_from_idle) p_.audio->Clear();
-    s_ = r.state;
-    if (s_.rev != before.rev) p_.post_gate_changed(e, s_.speaking, s_.rev);
     if (cleared != nullptr) *cleared = n;
+}
+
+// The counts by rule (stat). The stops by death are counted where the reason is known.
+void PlaybackGate::CountLocked(const Result& r) {
+    if (r.outcome == Outcome::kStale) {
+        stats_.stale++;
+        return;
+    }
+    const char* rule = r.rule != nullptr ? r.rule : "";
+    if (std::strcmp(rule, "R1.1") == 0) stats_.already++;
+    if (std::strcmp(rule, "R1.2") == 0) stats_.v_abort++;
+    if (std::strcmp(rule, "R2.2") == 0) stats_.v_k_ahead++;
+    if (std::strcmp(rule, "R2.2b") == 0) stats_.v_k_lowered++;
+    if (std::strcmp(rule, "R3.ignore") == 0) stats_.ignored_stop++;
+    if (r.outcome == Outcome::kRejected) stats_.rejected_start++;
+    if (!r.stopped) return;
+    if (r.outcome == Outcome::kEnded) {
+        stats_.stop_violation++;
+    } else if (std::strcmp(rule, "R1.3") == 0) {
+        stats_.stop_abort++;
+    } else if (std::strcmp(rule, "R5") == 0) {
+        stats_.stop_touch++;
+    } else if (std::strcmp(rule, "K2") == 0) {
+        stats_.stop_unbind++;
+    } else if (std::strncmp(rule, "R2.", 3) == 0) {
+        stats_.stop_tts_start++;
+    }
 }
 
 // A violation (R1.2, R2.2, R2.2b): the core stopped and marked the pair dead. Ask the manager to
@@ -51,8 +83,19 @@ void PlaybackGate::EndViolationLocked(uint64_t e, bool flush) {
 void PlaybackGate::StopForDeathLocked(uint64_t e, link::EndReason reason) {
     const State before = s_;
     const Result r = gate::StopForDeath(s_, e);
-    if (r.outcome == Outcome::kStale) return;  // not bound, another pair, or already dead
+    if (r.outcome == Outcome::kStale) {  // not bound, another pair, or already dead
+        stats_.stale++;
+        return;
+    }
     ApplyLocked(e, before, r, nullptr);
+    switch (reason) {
+        case link::EndReason::kF1: stats_.stop_f1++; break;
+        case link::EndReason::kF2: stats_.stop_f2++; break;
+        case link::EndReason::kAudioClosed:
+        case link::EndReason::kCtrlClosed:
+        case link::EndReason::kServerClose: stats_.stop_closed++; break;
+        default: stats_.stop_other_death++; break;
+    }
     p_.audio_queue->Close();
     p_.ctrl_queue->Close();
     p_.end_pair(e, reason, false);
@@ -61,6 +104,7 @@ void PlaybackGate::StopForDeathLocked(uint64_t e, link::EndReason reason) {
 Outcome PlaybackGate::Bind(uint64_t e, const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     const Result r = gate::Bind(s_, e);
+    if (r.outcome == Outcome::kStale) stats_.stale++;
     if (r.outcome == Outcome::kBound) {
         s_ = r.state;
         session_ = session_id;
@@ -72,6 +116,7 @@ Outcome PlaybackGate::Unbind(uint64_t e) {
     std::lock_guard<std::mutex> lock(mutex_);
     const State before = s_;
     const Result r = gate::Unbind(s_, e);
+    CountLocked(r);
     if (r.outcome == Outcome::kStale) return r.outcome;
     ApplyLocked(e, before, r, nullptr);
     session_.clear();
@@ -82,6 +127,7 @@ Outcome PlaybackGate::OnTtsStart(uint64_t e, const wire::TtsStart& t) {
     std::lock_guard<std::mutex> lock(mutex_);
     const State before = s_;
     const Result r = gate::OnTtsStart(s_, e, t.gen, t.aborted_gen, t.dev_abort_seen);
+    CountLocked(r);
     if (r.outcome == Outcome::kStale) return r.outcome;
     ApplyLocked(e, before, r, nullptr);
     if (r.outcome == Outcome::kEnded) EndViolationLocked(e, false);
@@ -92,6 +138,7 @@ Outcome PlaybackGate::OnTtsStop(uint64_t e, uint32_t gen) {
     std::lock_guard<std::mutex> lock(mutex_);
     const State before = s_;
     const Result r = gate::OnTtsStop(s_, e, gen);
+    CountLocked(r);
     if (r.outcome == Outcome::kStale) return r.outcome;
     ApplyLocked(e, before, r, nullptr);
     return r.outcome;
@@ -105,6 +152,7 @@ Outcome PlaybackGate::OnAbort(uint64_t e, const wire::AbortRequest& req) {
     }
     const State before = s_;
     const Result r = gate::OnAbort(s_, e, req.gen);
+    CountLocked(r);
     if (r.outcome == Outcome::kStale) return r.outcome;
     uint32_t cleared = 0;
     ApplyLocked(e, before, r, &cleared);
@@ -128,6 +176,7 @@ Outcome PlaybackGate::OnAbort(uint64_t e, const wire::AbortRequest& req) {
 Outcome PlaybackGate::OnServerAudio(uint64_t e, const std::function<bool()>& push) {
     std::lock_guard<std::mutex> lock(mutex_);
     const Result r = gate::OnServerAudio(s_, e);
+    if (r.outcome == Outcome::kStale) stats_.stale++;
     if (r.outcome == Outcome::kQueued) {
         if (!push()) {
             stats_.dropped_server++;
@@ -142,9 +191,13 @@ Outcome PlaybackGate::OnServerAudio(uint64_t e, const std::function<bool()>& pus
 TouchResult PlaybackGate::OnTouch(uint64_t e, wire::ListenMode mode, wire::DeviceAbortReason reason) {
     std::lock_guard<std::mutex> lock(mutex_);
     TouchResult out;
-    if (e == 0) return out;  // no pair the UI knows of (a gate without a pair says "ignored")
+    if (e == 0) {  // no pair the UI knows of (a gate without a pair says "ignored")
+        stats_.stale++;
+        return out;
+    }
     const State before = s_;
     const Result r = gate::OnTouch(s_, e);
+    CountLocked(r);
     out.rev = r.state.rev;
     if (r.outcome == Outcome::kStale) return out;
     if (r.outcome == Outcome::kIgnored) {
@@ -178,7 +231,10 @@ void PlaybackGate::ClearForListening() {
 
 bool PlaybackGate::PostLinkUp(uint64_t e) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (e == 0 || s_.bound_e != e || s_.dead) return false;
+    if (e == 0 || s_.bound_e != e || s_.dead) {
+        stats_.stale++;  // Codex review 157 Minor 1
+        return false;
+    }
     p_.post_link_up(e, s_.speaking, s_.rev);
     return true;
 }

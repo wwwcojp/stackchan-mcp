@@ -50,8 +50,11 @@ bool IsStale(const State& s, uint64_t e) {
     return e != s.bound_e;
 }
 
+// The stop processing of a pair that ends sets aborted_gen = max(aborted_gen, current_gen)
+// (contract §4 "死んだとみなしたとき", R1.2; plan 1 follow-up 1): stat reads it before the Unbind.
 Result Ended(const State& s, const char* rule) {
     State d = Stop(s);
+    d.aborted_gen = std::max(s.aborted_gen, s.current_gen);
     d.dead = true;
     return Make(d, Outcome::kEnded, rule, true);
 }
@@ -170,6 +173,7 @@ Result OnTouch(const State& s, uint64_t e) {
 Result StopForDeath(const State& s, uint64_t e) {
     if (s.bound_e == 0 || IsStale(s, e)) return Stale(s);
     State d = Stop(s);
+    d.aborted_gen = std::max(s.aborted_gen, s.current_gen);
     d.dead = true;
     return Make(d, Outcome::kStopped, "F", true);
 }

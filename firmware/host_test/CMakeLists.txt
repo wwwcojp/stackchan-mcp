@@ -235,3 +235,11 @@ add_executable(audio_pipeline_test test_audio_pipeline.cc ../main/audio/audio_pi
 target_include_directories(audio_pipeline_test PRIVATE ../main/audio ../main/gate ../main/net ../main/link)
 target_link_libraries(audio_pipeline_test PRIVATE GTest::gtest_main playback_gate_core)
 add_test(NAME audio_pipeline_test COMMAND audio_pipeline_test)
+
+# StackChan FW-A2 plan 2B-2a: the gate, the AudioService's pipeline and the UiController wired together
+add_executable(playback_wiring_test test_playback_wiring.cc ../main/gate/playback_gate.cc
+    ../main/audio/audio_pipeline.cc ../main/audio/playback_book.cc ../main/audio/audio_origin.cc
+    ../main/ui/ui_controller.cc ../main/net/send_queue.cc ../main/link/wire.cc)
+target_include_directories(playback_wiring_test PRIVATE ../main ../main/audio ../main/gate ../main/net ../main/link ../main/ui)
+target_link_libraries(playback_wiring_test PRIVATE GTest::gtest_main playback_gate_core ui_controller_core cjson)
+add_test(NAME playback_wiring_test COMMAND playback_wiring_test)

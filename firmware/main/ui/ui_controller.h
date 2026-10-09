@@ -77,6 +77,9 @@ public:
 
 struct UiStats {
     uint32_t dropped_resync = 0;  // a Resync that came while not in a conversation
+    // a touch, wake word or Toggle while the conversation is suspended (Starting, Activating, a
+    // non-conversation state): Step drops it, the shell records it (design §2.4, plan 2A follow-up 6)
+    uint32_t dropped_input = 0;
     uint32_t gate_calls = 0;
     uint32_t stale = 0;
     uint32_t refused_transitions = 0;

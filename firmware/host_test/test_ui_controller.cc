@@ -328,3 +328,21 @@ TEST(UiControllerShell, TheGatewaysListenAsAnEvent) {
     EXPECT_EQ(ev.kind, EvKind::kGwListenStop);
     EXPECT_EQ(ev.e, kE);
 }
+
+// stat (plan 2A follow-up 6): a user input while the conversation is suspended is dropped by Step
+// and counted by the shell; the gateway's listen is not a user input.
+TEST(UiShell, AUserInputWhileSuspendedIsCounted) {
+    Rig r;  // suspended until the first Resync (Starting, Activating)
+    r.Feed(Ev(EvKind::kTouch));
+    r.Feed(Ev(EvKind::kWakeWord));
+    r.Feed(Ev(EvKind::kToggle));
+    r.Feed(Ev(EvKind::kGwListenStart, E));
+    r.Feed(Ev(EvKind::kPlaybackDrained));
+    EXPECT_EQ(r.ui.stats().dropped_input, 3u);
+    r.Ready();
+    r.Feed(Ev(EvKind::kTouch));
+    EXPECT_EQ(r.ui.stats().dropped_input, 3u);
+    r.ui.EnterNonConversation(kDeviceStateWifiConfiguring);
+    r.Feed(Ev(EvKind::kToggle));
+    EXPECT_EQ(r.ui.stats().dropped_input, 4u);
+}
