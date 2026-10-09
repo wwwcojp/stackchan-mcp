@@ -1028,8 +1028,9 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
         espressif__touch_button_sensor
     )
 endif()
-# StackChan FW-A2 plans 1, 2A and 2B-1: the gate, UiController, the link manager and the
-# connection side. Built but not called yet: plan 2B-2 switches the FW over to them.
+# StackChan FW-A2 plans 1, 2A, 2B-1 and 2B-2a: the gate, UiController and its ESP ports, the link
+# manager, the connection side and the app ports. Built but not called yet: plan 2B-2b switches the
+# FW over to them (the AudioService already runs on audio/audio_pipeline).
 list(APPEND SOURCES
     "audio/audio_origin.cc"
     "audio/playback_book.cc"
@@ -1038,6 +1039,7 @@ list(APPEND SOURCES
     "gate/playback_gate.cc"
     "ui/ui_controller_core.cc"
     "ui/ui_controller.cc"
+    "ui/ui_ports_esp.cc"
     "link/link_manager_core.cc"
     "link/link_manager.cc"
     "link/wire.cc"
@@ -1048,6 +1050,8 @@ list(APPEND SOURCES
     "link/connect_plan.cc"
     "link/link_esp.cc"
     "link/link_hub.cc"
+    "link/stat_report.cc"
+    "link/app_link.cc"
     "net/send_queue.cc"
     "net/send_deadline.cc"
 )
