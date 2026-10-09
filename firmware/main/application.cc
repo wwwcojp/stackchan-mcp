@@ -924,11 +924,17 @@ void Application::SendMcpMessage(uint64_t e, const std::string& payload) {
 
 void Application::SendStackChanEvent(
     const char* event_type, const char* subtype, uint64_t duration_ms) {
-    if (!outbound_) {
-        return;
-    }
-    outbound_->StackChanEvent(event_type ? event_type : "", subtype ? subtype : "", duration_ms,
-                              esp_timer_get_time() / 1000);
+    // The head-touch poll calls this on the shared esp_timer task: build and queue on the main
+    // task, as FW-A did, so the timer task neither runs cJSON nor waits on the gate and queues
+    std::string event_type_str = event_type ? event_type : "";
+    std::string subtype_str = subtype ? subtype : "";
+    const int64_t ts_ms = esp_timer_get_time() / 1000;
+    Schedule([this, event_type_str, subtype_str, duration_ms, ts_ms]() {
+        if (!outbound_) {
+            return;
+        }
+        outbound_->StackChanEvent(event_type_str, subtype_str, duration_ms, ts_ms);
+    });
 }
 
 void Application::SendJsonString(const std::string& json_str) {
