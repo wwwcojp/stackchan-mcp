@@ -2460,36 +2460,16 @@ private:
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
         static int64_t last_release_ms = 0;       // デバウンス用 (= 直前 release 時刻)
-        static int64_t listening_started_ms = 0;  // タイムアウト用 (= listening 突入時刻)
-        static bool was_listening = false;        // listening 突入のエッジ検出
         const int64_t TOUCH_THRESHOLD_MS = 500;   // 触摸时长阈值，超过500ms视为长按
         const int64_t DEBOUNCE_MS = 300;          // 直前 release から N ms 以内の press は無視
-        const int64_t LISTEN_TIMEOUT_MS = 30000;  // listening 状態に N ms 以上滞在で auto stop
 
         auto& app = Application::GetInstance();
         int64_t now_ms = esp_timer_get_time() / 1000;
 
-        // --- listening 状態の上界 (タイムアウト) 管理 ---
-        // 状態遷移のエッジ検出で突入時刻を記録、 滞在時間が LISTEN_TIMEOUT_MS を
-        // 超えたら StopListening を自動発火する。 タッチ忘れ放置で listen が
-        // 無限持続するのを防ぐ。 StopListening 後は listening_started_ms を 0 に
-        // 戻して再発火を抑止 (次に listening 突入したら再セット)。
+        // StackChan FW-A2 (design §2.4): the listening timeout and the LED are UiController's (its
+        // 30 s one-shot timer, the LED from the screen's change). The indicator follows the state.
         bool is_listening = (app.GetDeviceState() == kDeviceStateListening);
         UpdateListeningIndicatorForState(is_listening);
-        if (is_listening && !was_listening) {
-            listening_started_ms = now_ms;
-            ESP_LOGI(TAG, "Listening entered at %d ms (timeout in %d ms)",
-                     (int)now_ms, (int)LISTEN_TIMEOUT_MS);
-        }
-        was_listening = is_listening;
-        if (is_listening && listening_started_ms != 0 &&
-            (now_ms - listening_started_ms) > LISTEN_TIMEOUT_MS) {
-            ESP_LOGI(TAG, "Listening timeout reached (%d ms) -> StopListening",
-                     (int)(now_ms - listening_started_ms));
-            SetAllRgbLeds(0, 0, 0);
-            app.StopListening();
-            listening_started_ms = 0;
-        }
 
         ft6336_->UpdateTouchPoint();
         auto& touch_point = ft6336_->GetTouchPoint();
@@ -2506,13 +2486,8 @@ private:
             }
             was_touched = true;
             touch_start_time = now_ms;
-            // タッチ瞬時の PlaySound 直接呼び出しは行わない。 直後に
-            // StartListening → EnableVoiceProcessing(true) → ResetDecoder で
-            // playback queue がクリアされて音が消えるため。 代わりに
-            // Application::StartListening 側で play_popup_on_listening_ flag を
-            // 立てて、 HandleStateChangedEvent の Listening 分岐後半 (ResetDecoder
-            // の後) で OGG_POPUP を鳴らす経路に乗せる (= xiaozhi 標準の WakeWord
-            // 経路と同じ仕組み)。
+            // タッチ瞬時に効果音は鳴らさない。 聞き取りの開始の効果音は、 UiController
+            // がマイクを開いた後に鳴らす (StackChan FW-A2 design §2.4)。
         }
         // 检测触摸释放
         else if (touch_point.num == 0 && was_touched) {
@@ -2522,52 +2497,24 @@ private:
 
             // 只有短触才触发
             if (touch_duration < TOUCH_THRESHOLD_MS) {
-                if (app.GetDeviceState() == kDeviceStateStarting) {
-                    EnterWifiConfigMode();
-                    return;
-                }
-                // kDeviceStateAudioTesting は WiFi config 完了直後の audio test
-                // モードに居る状態。 ここから WifiConfiguring に戻る経路は
-                // ToggleChatState() しか持っていない (= HandleStartListeningEvent
-                // は AudioTesting を扱わない)。 StartListening にだけ分岐すると
-                // タッチで設定モードに復帰できなくなるので、 AudioTesting だけ
-                // は従来通り ToggleChatState() に流して状態機械任せにする。
-                if (app.GetDeviceState() == kDeviceStateAudioTesting) {
-                    app.ToggleChatState();
-                    return;
-                }
-                // listening 中の2回目タッチは Application::HandleToggleChatEvent
-                // の既定経路 (CloseAudioChannel = WS 切断 → gateway の recording
-                // slot が aborted_mid_capture として buffer 破棄) ではなく
-                // StopListening (= SendStopListening) に分岐させる。これで
-                // device-driven audio capture push 経路 (gateway 側
-                // audio_input_hook) が listen.stop を受けて buffer を Ogg 化 +
-                // 外部 hook へ POST できる。Vessel UX として「タッチで listen
-                // 開始 → 発話 → タッチで送信」を成立させるための fork 専用分岐。
-                if (app.GetDeviceState() == kDeviceStateListening) {
-                    // 録音終了のフィードバック (= 全 LED 消灯)。 デバッグ目的、
-                    // MCP self.led.set_* 経由で上書き可能。
-                    SetAllRgbLeds(0, 0, 0);
-                    app.StopListening();
-                } else {
-                    // listening 開始は ToggleChatState ではなく StartListening
-                    // を使う。 ToggleChatState 経由は SetListeningMode に
-                    // GetDefaultListeningMode() (= AutoStop) を渡すため、
-                    // ペルソナ発話終了 (tts.stop) の Schedule 内で device が
-                    // 自動的に Listening 状態に再復帰してしまい (= xiaozhi の
-                    // 連続会話モデル、 application.cc:565)、 「タッチ駆動」 が
-                    // 破綻する (= 次のタッチが listen.stop 経路に入って即送信)。
-                    // StartListening 経由は HandleStartListeningEvent で
-                    // SetListeningMode(ManualStop) を強制するので、 tts.stop 後
-                    // は Idle に留まり、 次のタッチで明示的に listen 開始する
-                    // Vessel UX が成立する。 Idle 以外 (Speaking 等) でも
-                    // HandleStartListeningEvent が AbortSpeaking → ManualStop で
-                    // 適切に処理する。
-                    // 録音開始想定のフィードバック (= 全 LED 緑点灯、 控えめ
-                    // な輝度)。 実際の listen 起動は StartListening 経由で
-                    // 非同期処理。 タッチが取れたかどうかの体感を優先。
-                    SetAllRgbLeds(0, 32, 0);
-                    app.StartListening();
+                // StackChan FW-A2 (design §2.4 "タッチの分類"): Starting -> the Wi-Fi settings;
+                // the settings screens -> the audio test; a conversation state -> the Touch event
+                // (start, stop or R5 is UiController's and the gate's); anything else is dropped.
+                // The touch feedback LED is gone: UiController lights it when listening starts.
+                const DeviceState state = app.GetDeviceState();
+                switch (stackchan::ui::ClassifyTouch(state)) {
+                    case stackchan::ui::TouchRoute::kEnterWifiConfig:
+                        EnterWifiConfigMode();
+                        break;
+                    case stackchan::ui::TouchRoute::kToggleAudioTesting:
+                        app.ToggleAudioTesting();
+                        break;
+                    case stackchan::ui::TouchRoute::kTouch:
+                        app.Touch();
+                        break;
+                    case stackchan::ui::TouchRoute::kDrop:
+                        ESP_LOGI(TAG, "touch dropped in state %d", static_cast<int>(state));
+                        break;
                 }
             }
         }
@@ -7152,6 +7099,12 @@ public:
         StopTtsLipSync();
     }
 
+    // StackChan FW-A2 (design §2.4 v10): UiController lights it while listening (today's touch
+    // feedback colour); MCP self.led.set_* can still override it
+    virtual void SetListeningLed(bool on) override {
+        SetAllRgbLeds(0, on ? 32 : 0, 0);
+    }
+
     // Phase 4.5 avatar (saiverse-stackchan-addon): handle the gateway's
     // `avatar_set_fetch` WS message. Parse url/token/mode/checksum/
     // expected_size, spawn a worker task that performs HTTP GET + SHA256
@@ -7241,6 +7194,7 @@ public:
             delete context;
             avatar_fetch_in_progress_.store(false, std::memory_order_release);
             SendAvatarSetLoadedError(req_checksum, "task_create_failed");
+            ResumeMouthIfSpeaking();
         }
     }
 
@@ -7304,6 +7258,19 @@ public:
         // restoration happens last so a successful fetch doesn't restart
         // blink if the user disabled it mid-fetch.
         ApplyPendingAvatarAfterFetch();
+        ResumeMouthIfSpeaking();
+    }
+
+    // StackChan FW-A2 (design §2.4 v10): the mouth now starts when the screen enters Speaking, not
+    // at every tts start, so OnAvatarSetFetch's stop would last the whole playback: resume it on
+    // the main task when the screen is still Speaking (after the fetch, or when its task could not
+    // be made; Claude review 163 Minor 5)
+    void ResumeMouthIfSpeaking() {
+        Application::GetInstance().Schedule([this]() {
+            if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking) {
+                StartTtsLipSync();
+            }
+        });
     }
 
     static void SendAvatarSetLoaded(

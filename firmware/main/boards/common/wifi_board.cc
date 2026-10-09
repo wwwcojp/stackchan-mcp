@@ -158,8 +158,12 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
 
 void WifiBoard::StartWifiConfigMode() {
     in_config_mode_ = true;
-    // Transition to wifi configuring state
-    Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
+    // Transition to wifi configuring state. StackChan FW-A2 (design §2.4): on the main task, and
+    // out of a conversation through EnterNonConversation (the timer and wifi_cfg_delay tasks call
+    // this; the state machine is the main task's)
+    Application::GetInstance().Schedule([]() {
+        Application::GetInstance().EnterNonConversation(kDeviceStateWifiConfiguring);
+    });
 #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
     auto& wifi_manager = WifiManager::GetInstance();
 
