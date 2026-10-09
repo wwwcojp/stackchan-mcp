@@ -34,6 +34,19 @@ TouchRoute ClassifyTouch(DeviceState s);
 // the request waited (a settings-screen touch never becomes a conversation Toggle).
 std::optional<DeviceState> AudioTestingToggleTarget(DeviceState s);
 
+// Application's public entries (other boards call them too; plan 2B-2a handoff 19): where each goes,
+// by the device state on the main task (design §2.4, §2.5). A wake word is both the detector's and
+// WakeWordInvoke's.
+enum class Entry { kToggleChat, kStartListening, kStopListening, kWakeWord };
+enum class EntryRoute {
+    kTouch,               // the Touch event
+    kToggle,              // the Toggle event
+    kWakeWord,            // the WakeWord event
+    kToggleAudioTesting,  // the settings screens: ToggleAudioTesting
+    kDrop,                // log and drop (Activating included: design §2.4 v10)
+};
+EntryRoute RouteEntry(Entry entry, DeviceState s);
+
 TouchReply ToTouchReply(gate::TouchOutcome o);  // plan 1 handoff 13
 wire::ListenMode ToWireMode(Mode m);
 // The gateway's listen as an event (the audio receive task posts it): start carries the mode and
@@ -97,6 +110,9 @@ public:
     bool ProcessOne();
     // The main task: leave the conversation for `target` (WifiConfiguring, Upgrading).
     void EnterNonConversation(DeviceState target);
+    // The main task, before the Resync: the settings read from what the assets made (the wake word
+    // detector is made when they are applied, after UiController; Codex review 162)
+    void Configure(UiConfig config);
 
     State state() const { return s_; }
     UiStats stats() const;
@@ -106,7 +122,7 @@ private:
     void Do(const Action& a);
 
     UiPorts* ports_;
-    const UiConfig config_;
+    UiConfig config_;
     State s_;
     mutable std::mutex mutex_;  // the list only (a leaf: nothing is called under it)
     std::deque<Event> list_;

@@ -27,6 +27,26 @@ std::optional<DeviceState> AudioTestingToggleTarget(DeviceState s) {
     return std::nullopt;
 }
 
+EntryRoute RouteEntry(Entry entry, DeviceState s) {
+    switch (entry) {
+        case Entry::kToggleChat:
+            if (IsConversation(s)) return EntryRoute::kToggle;
+            if (AudioTestingToggleTarget(s)) return EntryRoute::kToggleAudioTesting;
+            return EntryRoute::kDrop;
+        case Entry::kStartListening:  // listening already: a Touch would stop it
+            if (s == kDeviceStateIdle || s == kDeviceStateSpeaking) return EntryRoute::kTouch;
+            if (s == kDeviceStateWifiConfiguring) return EntryRoute::kToggleAudioTesting;
+            return EntryRoute::kDrop;
+        case Entry::kStopListening:
+            if (s == kDeviceStateListening) return EntryRoute::kTouch;
+            if (s == kDeviceStateAudioTesting) return EntryRoute::kToggleAudioTesting;
+            return EntryRoute::kDrop;
+        case Entry::kWakeWord:
+            return IsConversation(s) ? EntryRoute::kWakeWord : EntryRoute::kDrop;
+    }
+    return EntryRoute::kDrop;
+}
+
 TouchReply ToTouchReply(gate::TouchOutcome o) {
     switch (o) {
         case gate::TouchOutcome::kR5: return TouchReply::kR5;
@@ -72,6 +92,11 @@ DeviceState ToDeviceState(Disp d) {
 }  // namespace
 
 UiController::UiController(UiPorts* ports, UiConfig config) : ports_(ports), config_(config) {
+    s_.wake_in_listening = config.wake_in_listening;
+}
+
+void UiController::Configure(UiConfig config) {
+    config_ = config;
     s_.wake_in_listening = config.wake_in_listening;
 }
 

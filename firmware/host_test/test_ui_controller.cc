@@ -103,6 +103,41 @@ TEST(UiShellPure, TouchRoutes) {
     EXPECT_FALSE(AudioTestingToggleTarget(kDeviceStateActivating).has_value());
 }
 
+// Application's public entries (other boards call them; plan 2B-2a handoff 19) by the device state
+// on the main task (design §2.4, §2.5)
+TEST(UiShellPure, EntryRoutes) {
+    const DeviceState conv[] = {kDeviceStateIdle, kDeviceStateListening, kDeviceStateSpeaking};
+    const DeviceState other[] = {kDeviceStateStarting, kDeviceStateActivating, kDeviceStateUpgrading,
+                                 kDeviceStateFatalError, kDeviceStateConnecting, kDeviceStateUnknown};
+    // ToggleChatState: the conversation's Toggle; the settings screens toggle the audio test
+    // (today's HandleToggleChatEvent 863-870); Activating drops it (design §2.4, was: to Idle)
+    for (DeviceState s : conv) EXPECT_EQ(RouteEntry(Entry::kToggleChat, s), EntryRoute::kToggle) << S(s);
+    EXPECT_EQ(RouteEntry(Entry::kToggleChat, kDeviceStateWifiConfiguring), EntryRoute::kToggleAudioTesting);
+    EXPECT_EQ(RouteEntry(Entry::kToggleChat, kDeviceStateAudioTesting), EntryRoute::kToggleAudioTesting);
+    for (DeviceState s : other) EXPECT_EQ(RouteEntry(Entry::kToggleChat, s), EntryRoute::kDrop) << S(s);
+    // StartListening: a touch where it starts (Idle) or interrupts (Speaking: R5); listening
+    // already: nothing (a Touch would stop it); WifiConfiguring: the audio test (today 932-935)
+    EXPECT_EQ(RouteEntry(Entry::kStartListening, kDeviceStateIdle), EntryRoute::kTouch);
+    EXPECT_EQ(RouteEntry(Entry::kStartListening, kDeviceStateSpeaking), EntryRoute::kTouch);
+    EXPECT_EQ(RouteEntry(Entry::kStartListening, kDeviceStateListening), EntryRoute::kDrop);
+    EXPECT_EQ(RouteEntry(Entry::kStartListening, kDeviceStateWifiConfiguring), EntryRoute::kToggleAudioTesting);
+    EXPECT_EQ(RouteEntry(Entry::kStartListening, kDeviceStateAudioTesting), EntryRoute::kDrop);
+    for (DeviceState s : other) EXPECT_EQ(RouteEntry(Entry::kStartListening, s), EntryRoute::kDrop) << S(s);
+    // StopListening: a touch while listening stops it; AudioTesting goes back (today 983-986)
+    EXPECT_EQ(RouteEntry(Entry::kStopListening, kDeviceStateListening), EntryRoute::kTouch);
+    EXPECT_EQ(RouteEntry(Entry::kStopListening, kDeviceStateIdle), EntryRoute::kDrop);
+    EXPECT_EQ(RouteEntry(Entry::kStopListening, kDeviceStateSpeaking), EntryRoute::kDrop);
+    EXPECT_EQ(RouteEntry(Entry::kStopListening, kDeviceStateAudioTesting), EntryRoute::kToggleAudioTesting);
+    EXPECT_EQ(RouteEntry(Entry::kStopListening, kDeviceStateWifiConfiguring), EntryRoute::kDrop);
+    for (DeviceState s : other) EXPECT_EQ(RouteEntry(Entry::kStopListening, s), EntryRoute::kDrop) << S(s);
+    // A wake word (detected, or WakeWordInvoke): the WakeWord event in a conversation; Activating
+    // drops it (design §2.4, was: to Idle)
+    for (DeviceState s : conv) EXPECT_EQ(RouteEntry(Entry::kWakeWord, s), EntryRoute::kWakeWord) << S(s);
+    EXPECT_EQ(RouteEntry(Entry::kWakeWord, kDeviceStateWifiConfiguring), EntryRoute::kDrop);
+    EXPECT_EQ(RouteEntry(Entry::kWakeWord, kDeviceStateAudioTesting), EntryRoute::kDrop);
+    for (DeviceState s : other) EXPECT_EQ(RouteEntry(Entry::kWakeWord, s), EntryRoute::kDrop) << S(s);
+}
+
 TEST(UiShellPure, TouchRepliesAndModes) {
     EXPECT_EQ(ToTouchReply(g::TouchOutcome::kR5), TouchReply::kR5);
     EXPECT_EQ(ToTouchReply(g::TouchOutcome::kSendFailed), TouchReply::kSendFailed);
@@ -302,6 +337,25 @@ TEST(UiShell, TheListeningDetectorSettingReachesStep) {
     r.Feed(Ev(EvKind::kTouch));
     EXPECT_TRUE(r.Logged("detect on"));
     EXPECT_FALSE(r.Logged("detect off"));
+}
+
+// The settings come from what the assets make (the wake word detector is made when they are
+// applied, after UiController is made): Configure sets them before the Resync (Codex review 162)
+TEST(UiShell, ConfigureSetsTheSettingsTheAssetsMade) {
+    Rig r;  // made before the assets: no detector yet
+    r.ui.Configure(UiConfig{false, true, false});
+    r.Ready();
+    Event start = Ev(EvKind::kGateChanged, E);
+    start.spk = true;
+    start.rev = 1;
+    r.Feed(start);
+    EXPECT_TRUE(r.Logged("detect on"));  // wake_in_speaking: a wake word may interrupt the playback
+    Rig l;
+    l.ui.Configure(UiConfig{true, false, false});
+    l.Ready();
+    l.Feed(Ev(EvKind::kTouch));
+    EXPECT_TRUE(l.Logged("detect on"));  // wake_in_listening reaches Step
+    EXPECT_FALSE(l.Logged("detect off"));
 }
 
 // The gateway's listen as a UiController event (the audio receive task posts it, design §2.4)
