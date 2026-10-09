@@ -64,8 +64,8 @@ void LinkHub::ManagerMain(void* arg) {
     for (uint32_t turns = 0;; turns++) {
         hub->manager_.RunOnce();
         const State st = hub->manager_.state();  // the other tasks' view (design §1.2)
-        hub->bound_e_.store(st.stage == Stage::kBound ? st.e : 0);
-        hub->audio_only_.store(st.stage == Stage::kAudioOnly);
+        hub->Publish(st.stage == Stage::kBound ? st.e : 0, st.stage == Stage::kAudioOnly);
+        hub->stopped_.store(ShutdownComplete(st));
         if ((turns & 255u) == 0) NoteStack(&hub->mgr_stack_min_);
     }
 }
@@ -329,10 +329,20 @@ void LinkHub::AddTotalsLocked(const Link& link) {
     }
 }
 
-std::string LinkHub::ConnectedUrl() {
-    if (!TransportConnected()) return "";
+// The view and the URL change together under the leaf mutex, so the URL is always the one of the
+// link that was bound (or kAudioOnly) when the view was taken, never a later attempt's still
+// waiting for its hello (Codex review 160, Claude review 161 Minor 1).
+void LinkHub::Publish(uint64_t bound, bool audio_only) {
+    if (bound == bound_e_.load() && audio_only == audio_only_.load()) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    return audio_ ? audio_->url() : "";
+    connected_url_ = (bound != 0 || audio_only) && audio_ ? audio_->url() : "";
+    bound_e_.store(bound);
+    audio_only_.store(audio_only);
+}
+
+std::string LinkHub::ConnectedUrl() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connected_url_;
 }
 
 net::PushResult LinkHub::PushMic(uint32_t timestamp, const uint8_t* opus, size_t len) {

@@ -140,4 +140,9 @@ constexpr uint32_t kBackoffMaxMs = 15'000;
 
 StepResult Step(const State& s, const Input& in);
 
+// Reboot / OTA wait for this (design §3.5, Claude review 163 Important 1): the shutdown was taken,
+// the pair is over and none of its tasks runs. The bound view drops as soon as the end is decided,
+// before the link tasks exit, so it cannot tell this.
+bool ShutdownComplete(const State& s);
+
 }  // namespace stackchan::link

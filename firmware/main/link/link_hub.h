@@ -49,13 +49,17 @@ public:
     bool Start();
     // Reboot / OTA (design §3.5): no reconnect; the pair ends.
     void RequestShutdown();
+    // After RequestShutdown: the pair is over and none of its tasks runs (ShutdownComplete, written
+    // by the manager task after each turn). Reboot and OTA wait for this, at most 1 s.
+    bool Stopped() const { return stopped_.load(); }
 
     // Other tasks' view of the link (design §1.2; plan 2B-1 handoff 3, 4): atomics the manager task
     // writes after each turn. Never UiController's state.
     uint64_t BoundPair() const { return bound_e_.load(); }  // ready sent (kBound), else 0
     bool AudioOnly() const { return audio_only_.load(); }   // kAudioOnly: the audio link alone
     bool TransportConnected() const { return BoundPair() != 0 || AudioOnly(); }
-    std::string ConnectedUrl();  // the audio link's URL while TransportConnected(), else ""
+    // The URL of the audio link of the view above (taken with it), else ""
+    std::string ConnectedUrl();
     // The main task's mic audio (MAIN_EVENT_SEND_AUDIO): a kMic frame of the bound pair in the
     // audio send queue, in the audio link's Protocol-Version. Never waits.
     net::PushResult PushMic(uint32_t timestamp, const uint8_t* opus, size_t len);
@@ -111,6 +115,8 @@ private:
     void Adopt(LinkSide side, uint32_t attempt, std::unique_ptr<Link> link);
     void Push(net::SendQueue* q, uint64_t e, const std::string& json, const char* what);
     void AddTotalsLocked(const Link& link);
+    // The manager task, after each turn: the view above and its URL, together
+    void Publish(uint64_t bound, bool audio_only);
 
     HubDeps d_;
     LinkManager manager_;
@@ -124,6 +130,8 @@ private:
     StackMarks stack_marks_;                 // links destroyed so far (under mutex_)
     std::atomic<uint64_t> bound_e_{0};
     std::atomic<bool> audio_only_{false};
+    std::string connected_url_;  // under mutex_, written with the two above (Publish)
+    std::atomic<bool> stopped_{false};
     std::atomic<int> audio_version_{1};  // the audio link's Protocol-Version (SendAudioHello)
     std::atomic<uint32_t> mgr_stack_min_{0}, conn_stack_min_{0};
     uint32_t link_restarts_ = 0;  // NVS at construction (it only grows right before a restart)

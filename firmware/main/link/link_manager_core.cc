@@ -254,4 +254,8 @@ StepResult Step(const State& s0, const Input& in) {
     return r;
 }
 
+bool ShutdownComplete(const State& s) {
+    return s.stage == Stage::kStopped && s.pending_exits == 0;
+}
+
 }  // namespace stackchan::link

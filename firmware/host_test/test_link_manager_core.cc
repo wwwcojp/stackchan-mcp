@@ -312,6 +312,28 @@ TEST(LinkManagerCore, ShutdownStopsReconnecting) {
     EXPECT_TRUE(Step(s, Tick(100 * S)).out.empty());
 }
 
+// Plan 2B-2b (Claude review 163 Important 1): Reboot and OTA wait for ShutdownComplete, not for
+// the bound view to drop (it drops as soon as the end is decided, before the link tasks exit)
+TEST(LinkManagerCore, ShutdownCompleteWaitsForEveryTask) {
+    EXPECT_FALSE(ShutdownComplete(Bound()));
+    State s = Step(Bound(), WithE(InKind::kShutdown, 0, 2 * S)).state;
+    EXPECT_EQ(s.stage, Stage::kEnding);
+    EXPECT_FALSE(ShutdownComplete(s));
+    for (uint32_t t : {kAudioRx, kAudioTx, kCtrlRx}) {
+        s = Step(s, Exited(1, t, 2 * S)).state;
+        EXPECT_FALSE(ShutdownComplete(s));
+    }
+    s = Step(s, Exited(1, kCtrlTx, 2 * S)).state;
+    EXPECT_TRUE(ShutdownComplete(s));
+    // a shutdown while the audio link is being connected: complete once its worker exits
+    State a = Step(Step(State{}, Tick(0)).state, WithE(InKind::kShutdown, 0, 0)).state;
+    EXPECT_FALSE(ShutdownComplete(a));
+    EXPECT_TRUE(ShutdownComplete(Step(a, Exited(1, kAudioWorker, 0)).state));
+    // nothing running: complete at once, but only with the shutdown
+    EXPECT_FALSE(ShutdownComplete(State{}));
+    EXPECT_TRUE(ShutdownComplete(Step(State{}, WithE(InKind::kShutdown, 0, 0)).state));
+}
+
 // Final reviews 135/136: the end waits for exactly the tasks that exist, whatever the order of
 // the notices from the shell's tasks.
 TEST(LinkManagerCore, AllExitsDuringTheFlushDestroyAtOnce) {
