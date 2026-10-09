@@ -732,19 +732,6 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
     return true;
 }
 
-bool AudioService::PushServerPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet) {
-    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    if (!accept_server_audio_) {
-        server_audio_rejected_++;
-        return false;
-    }
-    if (!pipeline_.PushServer(lock, packet)) {  // StackChan FW-A2: counted by the book only when queued
-        return false;
-    }
-    audio_queue_cv_.notify_all();
-    return true;
-}
-
 bool AudioService::PushServerAudio(std::unique_ptr<AudioStreamPacket>& packet) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     if (!pipeline_.PushServer(lock, packet)) {
@@ -767,18 +754,6 @@ stackchan::audio::PlaybackBook AudioService::PlaybackBookSnapshot() {
 stackchan::audio::PipelineStats AudioService::PlaybackStats() {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     return pipeline_.stats(lock);
-}
-
-void AudioService::AcceptServerAudio(bool accept) {
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    accept_server_audio_ = accept;
-}
-
-uint32_t AudioService::TakeServerAudioRejected() {
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    const uint32_t rejected = server_audio_rejected_;
-    server_audio_rejected_ = 0;
-    return rejected;
 }
 
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
@@ -856,8 +831,9 @@ void AudioService::EnableVoiceProcessing(bool enable) {
             audio_processor_initialized_ = true;
         }
 
-        /* We should make sure no audio is playing */
-        ResetDecoder();
+        // StackChan FW-A2 (design §2.4, Codex review 130 Important 5): opening the mic no longer
+        // clears the queues (it would drop the listening popup and a new playback's audio); the
+        // gate clears them (ClearForListening and its stop)
         audio_input_need_warmup_ = true;
         // Reset input resampler to clear cached data from previous mode (e.g. WakeWord)
         // This prevents buffer overflow when switching between different feed sizes
@@ -885,7 +861,7 @@ void AudioService::EnableRawCapture(bool enable) {
         }
         xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
 
-        ResetDecoder();
+        // StackChan FW-A2: no ResetDecoder here either (see EnableVoiceProcessing)
         audio_input_need_warmup_ = true;
         {
             std::lock_guard<std::mutex> lock(input_resampler_mutex_);
@@ -970,22 +946,6 @@ void AudioService::PlaySoundImpl(const std::string_view& ogg, bool wait, bool* a
 bool AudioService::IsIdle() {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     return audio_encode_queue_.empty() && pipeline_.Empty(lock) && audio_testing_queue_.empty();
-}
-
-void AudioService::WaitForPlaybackQueueEmpty() {
-    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    audio_queue_cv_.wait(lock, [this, &lock]() {
-        return service_stopped_ || pipeline_.Empty(lock);
-    });
-}
-
-uint32_t AudioService::ResetDecoder() {
-    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    accept_server_audio_ = false;
-    // StackChan FW-A2: the pipeline bumps the one generation and calls ResetDecoderStateLocked
-    const uint32_t cleared = pipeline_.Reset(lock);
-    audio_queue_cv_.notify_all();
-    return cleared;
 }
 
 void AudioService::ResetDecoderStateLocked() {

@@ -98,8 +98,8 @@ public:
     void RequestDrain(const QueueLock& lk);  // AutoStop (design §2.4)
 
     // ---- the AudioService ----
-    // FW-A's ResetDecoder (until plan 2B-2b switches it off) and AudioService::Stop: empty both
-    // queues. Returns the items removed.
+    // AudioService::Stop (FW-A's ResetDecoder used it too until plan 2B-2b): empty both queues.
+    // Returns the items removed.
     uint32_t Reset(const QueueLock& lk);
     // EnableAudioTesting(false): the recording replaces the decode queue, as local sounds; the
     // playback queue is emptied too (a clear empties both: Claude review 156 Minor 1).

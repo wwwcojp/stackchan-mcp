@@ -112,7 +112,6 @@ public:
     const std::string& GetLastWakeWord() const;
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsIdle();
-    void WaitForPlaybackQueueEmpty();
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
     bool IsRawCaptureRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_RAW_CAPTURE_RUNNING; }
@@ -127,24 +126,13 @@ public:
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
-    // StackChan FW-A (design §2.1.2): server audio only. Dropped (and counted) while
-    // server audio is not accepted, i.e. from ResetDecoder() until AcceptServerAudio(true).
-    // Local sounds (PlaySound) keep using PushPacketToDecodeQueue and are never gated.
-    bool PushServerPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet);
-    void AcceptServerAudio(bool accept);
-    // Diagnostic count of server packets dropped by the gate since the last call; resets it.
-    uint32_t TakeServerAudioRejected();
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
-    // StackChan FW-A (design §2.1.1): clears the decode/playback queues, bumps the playback
-    // generation (so audio decoded from an already-popped packet is discarded) and stops
-    // accepting server audio, all under one lock. Returns the number of queued items cleared.
-    uint32_t ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
 
-    // StackChan FW-A2 (plan 2B-2a; design §2.2, §2.4, §6.1). Built in, not called until plan 2B-2b
-    // switches the application over (FW-A's AcceptServerAudio / ResetDecoder path stays until then).
+    // StackChan FW-A2 (design §2.2, §2.4, §6.1): the gate and UiController's way in. Only the gate
+    // clears the queues (FW-A's ResetDecoder / AcceptServerAudio are gone, plan 2B-2b).
     // The gate's AudioSink: a stop clears only when server audio accepted since the previous stop
     // is still unwritten; ClearForListening and the start from Idle clear unconditionally.
     stackchan::gate::AudioSink* playback_sink() { return &playback_sink_; }
@@ -204,8 +192,6 @@ private:
         [this]() { ResetDecoderStateLocked(); }};
     stackchan::audio::PipelineSink playback_sink_{&audio_queue_mutex_, &pipeline_,
                                                   [this]() { audio_queue_cv_.notify_all(); }};
-    bool accept_server_audio_ = false;              // guarded by audio_queue_mutex_
-    uint32_t server_audio_rejected_ = 0;            // diagnostic; not part of abort dropped_ms
     std::mutex raw_capture_mutex_;
     std::atomic<uint32_t> raw_capture_generation_{0};
     std::unique_ptr<std::vector<int16_t>> raw_capture_buffer_;

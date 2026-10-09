@@ -10,7 +10,8 @@
                 "CONFIG_CAMERA_GC0308_DVP_YUV422_320X240_20FPS=y",
                 "CONFIG_STACKCHAN_SERVO_FEETECH=y",
                 "CONFIG_STACKCHAN_SKIP_OTA_CHECK=y",
-                "CONFIG_STACKCHAN_WIFI_PS_NONE=y"
+                "CONFIG_STACKCHAN_WIFI_PS_NONE=y",
+                "CONFIG_SEND_WAKE_WORD_DATA=n"
             ]
         }
     ]
