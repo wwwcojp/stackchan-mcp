@@ -21,6 +21,7 @@
 #include "playback_gate.h"
 #include "rx_link.h"
 #include "send_queue.h"
+#include "stat_report.h"
 #include "ui_controller.h"
 
 namespace stackchan::link {
@@ -48,6 +49,19 @@ public:
     bool Start();
     // Reboot / OTA (design §3.5): no reconnect; the pair ends.
     void RequestShutdown();
+
+    // Other tasks' view of the link (design §1.2; plan 2B-1 handoff 3, 4): atomics the manager task
+    // writes after each turn. Never UiController's state.
+    uint64_t BoundPair() const { return bound_e_.load(); }  // ready sent (kBound), else 0
+    bool AudioOnly() const { return audio_only_.load(); }   // kAudioOnly: the audio link alone
+    bool TransportConnected() const { return BoundPair() != 0 || AudioOnly(); }
+    std::string ConnectedUrl();  // the audio link's URL while TransportConnected(), else ""
+    // The main task's mic audio (MAIN_EVENT_SEND_AUDIO): a kMic frame of the bound pair in the
+    // audio send queue, in the audio link's Protocol-Version. Never waits.
+    net::PushResult PushMic(uint32_t timestamp, const uint8_t* opus, size_t len);
+    // stat: the hub's part (the pairs ended, restarts, the notice queue, the send queues, the link
+    // totals, the stacks). The gate, the pipeline, the UI, the heap and the build are the caller's.
+    void FillStat(StatInputs* in);
 
     // ManagerPorts (the manager task only)
     int64_t NowUs() override;
@@ -96,6 +110,7 @@ private:
     // attempt meanwhile reaches the link at once.
     void Adopt(LinkSide side, uint32_t attempt, std::unique_ptr<Link> link);
     void Push(net::SendQueue* q, uint64_t e, const std::string& json, const char* what);
+    void AddTotalsLocked(const Link& link);
 
     HubDeps d_;
     LinkManager manager_;
@@ -105,6 +120,13 @@ private:
     std::mutex mutex_;  // a leaf: the links below
     std::unique_ptr<Link> audio_, ctrl_;
     uint32_t links_attempt_ = 0;
+    LinkTotals audio_totals_, ctrl_totals_;  // links destroyed so far (under mutex_)
+    StackMarks stack_marks_;                 // links destroyed so far (under mutex_)
+    std::atomic<uint64_t> bound_e_{0};
+    std::atomic<bool> audio_only_{false};
+    std::atomic<int> audio_version_{1};  // the audio link's Protocol-Version (SendAudioHello)
+    std::atomic<uint32_t> mgr_stack_min_{0}, conn_stack_min_{0};
+    uint32_t link_restarts_ = 0;  // NVS at construction (it only grows right before a restart)
 };
 
 }  // namespace stackchan::link

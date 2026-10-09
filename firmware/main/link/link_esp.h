@@ -73,6 +73,10 @@ public:
     uint64_t epoch() const { return p_.e; }
     LinkPhase& phase() { return phase_; }
     const RxLink& rx() const { return rx_; }
+    const TxLoop& tx() const { return tx_; }  // read after the send task exited (stat totals)
+    // The smallest free stack (bytes) each task measured on itself so far; 0 before (stat)
+    uint32_t rx_stack_min() const { return rx_stack_min_.load(); }
+    uint32_t tx_stack_min() const { return tx_stack_min_.load(); }
     int64_t last_rx_us() const { return last_rx_us_.load(); }
     const std::string& url() const { return p_.plan.url; }
     int protocol_version() const { return p_.plan.version; }
@@ -89,6 +93,8 @@ private:
     LinkPhase phase_;
     std::atomic<int64_t> last_rx_us_{0};
     std::atomic<bool> stop_{false};
+    std::atomic<uint32_t> rx_stack_min_{0}, tx_stack_min_{0};
+    uint32_t rx_batches_ = 0;  // the receive task's own count: it measures its stack every 16th
     RxLink rx_;
     TxLoop tx_;
     std::string leftover_;  // bytes after the handshake response (frames): the receive task's first

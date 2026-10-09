@@ -7,6 +7,18 @@
 
 #include "ws_frame.h"
 
+namespace {
+
+// Keep the smallest free stack the calling task has seen (stat; design §1.1, §6.2)
+void NoteStack(std::atomic<uint32_t>* min) {
+    const uint32_t free_bytes = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) * sizeof(StackType_t);
+    uint32_t cur = min->load();
+    while ((cur == 0 || free_bytes < cur) && !min->compare_exchange_weak(cur, free_bytes)) {
+    }
+}
+
+}  // namespace
+
 #define TAG "Link"
 
 namespace stackchan::link {
@@ -116,7 +128,10 @@ bool Link::Handshake(const std::function<bool()>& stop) {
 Link::StartResult Link::Start() {
     const LinkTasks tasks = TasksFor(p_.side);
     last_rx_us_.store(esp_timer_get_time());
-    tcp_.OnStream([this](const std::string& data) { rx_.OnBytes(data.data(), data.size()); });
+    tcp_.OnStream([this](const std::string& data) {
+        rx_.OnBytes(data.data(), data.size());
+        if ((rx_batches_++ & 15u) == 0) NoteStack(&rx_stack_min_);  // the receive task itself
+    });
     tcp_.OnDisconnected([this] { rx_.OnDisconnected(); });
     NoticeQueue* notices = p_.notices;
     const Input rx_exit = Exited(p_.attempt, RxBit(p_.side));
@@ -143,8 +158,11 @@ void Link::RequestStop() {
 
 void Link::TxMain(void* arg) {
     Link* link = static_cast<Link*>(arg);
+    uint32_t turns = 0;
     while (link->tx_.RunOnce()) {
+        if ((turns++ & 63u) == 0) NoteStack(&link->tx_stack_min_);
     }
+    NoteStack(&link->tx_stack_min_);
     // The last touch of the link: after the post the manager may destroy it.
     NoticeQueue* notices = link->p_.notices;
     const Input exited = Exited(link->p_.attempt, TxBit(link->p_.side));

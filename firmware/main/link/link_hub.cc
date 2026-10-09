@@ -6,6 +6,7 @@
 #include <esp_system.h>
 #include <esp_timer.h>
 
+#include "rx_route.h"
 #include "settings.h"
 #include "wire.h"
 
@@ -30,9 +31,25 @@ std::string Print(cJSON* root) {
 
 const char* SideName(LinkSide side) { return side == LinkSide::kAudio ? "audio" : "ctrl"; }
 
+void NoteStack(std::atomic<uint32_t>* min) {
+    const uint32_t free_bytes = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) * sizeof(StackType_t);
+    uint32_t cur = min->load();
+    while ((cur == 0 || free_bytes < cur) && !min->compare_exchange_weak(cur, free_bytes)) {
+    }
+}
+
+uint32_t MinNonZero(uint32_t a, uint32_t b) {
+    if (a == 0) return b;
+    if (b == 0) return a;
+    return a < b ? a : b;
+}
+
 }  // namespace
 
-LinkHub::LinkHub(HubDeps deps) : d_(std::move(deps)), manager_(this, d_.notices), stamp_(d_.boot_count) {}
+LinkHub::LinkHub(HubDeps deps) : d_(std::move(deps)), manager_(this, d_.notices), stamp_(d_.boot_count) {
+    Settings settings("stackchan", false);
+    link_restarts_ = static_cast<uint32_t>(settings.GetInt("link_restarts", 0));
+}
 
 bool LinkHub::Start() {
     if (const char* missing = MissingAppPort(d_.app)) {  // Claude review 152 Minor 3
@@ -44,8 +61,12 @@ bool LinkHub::Start() {
 
 void LinkHub::ManagerMain(void* arg) {
     LinkHub* hub = static_cast<LinkHub*>(arg);
-    for (;;) {
+    for (uint32_t turns = 0;; turns++) {
         hub->manager_.RunOnce();
+        const State st = hub->manager_.state();  // the other tasks' view (design §1.2)
+        hub->bound_e_.store(st.stage == Stage::kBound ? st.e : 0);
+        hub->audio_only_.store(st.stage == Stage::kAudioOnly);
+        if ((turns & 255u) == 0) NoteStack(&hub->mgr_stack_min_);
     }
 }
 
@@ -160,6 +181,7 @@ LinkHub::WorkerOutcome LinkHub::RunWorker(Worker* w) {
         }
     }
     delete w;
+    NoteStack(&hub->conn_stack_min_);
     return out;
 }
 
@@ -209,6 +231,7 @@ void LinkHub::SendAudioHello(uint32_t attempt, uint64_t e) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (audio_ && links_attempt_ == attempt) version = audio_->protocol_version();
     }
+    audio_version_.store(version);
     d_.audio_queue->Open(e);
     Push(d_.audio_queue, e, BuildAudioHello(version, d_.server_aec, d_.frame_duration_ms), "audio hello");
 }
@@ -276,8 +299,75 @@ void LinkHub::RequestStop(uint64_t /*e*/) {
 
 void LinkHub::Destroy(uint64_t /*e*/) {
     std::lock_guard<std::mutex> lock(mutex_);  // every task of the attempt has exited
+    if (audio_) AddTotalsLocked(*audio_);
+    if (ctrl_) AddTotalsLocked(*ctrl_);
     audio_.reset();
     ctrl_.reset();
+}
+
+// stat: a destroyed link's counts (its tasks exited: nothing writes them any more)
+void LinkHub::AddTotalsLocked(const Link& link) {
+    LinkTotals& t = link.side() == LinkSide::kAudio ? audio_totals_ : ctrl_totals_;
+    const RxStats& rx = link.rx().stats();
+    const TxStats& tx = link.tx().stats();
+    t.rx_frames += rx.frames;
+    t.rx_dropped += rx.dropped;
+    t.bad_audio += rx.bad_audio;
+    t.extra_hellos += rx.extra_hellos;
+    t.pongs_lost += rx.pongs_lost;
+    t.tx_sent += tx.sent;
+    t.tx_f2 += tx.f2;
+    t.tx_errors += tx.errors;
+    t.tx_stale += tx.stale;
+    t.tx_bad_json += tx.bad_json;
+    if (link.side() == LinkSide::kAudio) {
+        stack_marks_.audio_rx = MinNonZero(stack_marks_.audio_rx, link.rx_stack_min());
+        stack_marks_.audio_tx = MinNonZero(stack_marks_.audio_tx, link.tx_stack_min());
+    } else {
+        stack_marks_.ctrl_rx = MinNonZero(stack_marks_.ctrl_rx, link.rx_stack_min());
+        stack_marks_.ctrl_tx = MinNonZero(stack_marks_.ctrl_tx, link.tx_stack_min());
+    }
+}
+
+std::string LinkHub::ConnectedUrl() {
+    if (!TransportConnected()) return "";
+    std::lock_guard<std::mutex> lock(mutex_);
+    return audio_ ? audio_->url() : "";
+}
+
+net::PushResult LinkHub::PushMic(uint32_t timestamp, const uint8_t* opus, size_t len) {
+    const uint64_t e = bound_e_.load();
+    if (e == 0) return net::PushResult::kClosed;
+    return d_.audio_queue->Push(e, net::ElemKind::kMic, EncodeAudioFrame(audio_version_.load(), timestamp, opus, len),
+                                esp_timer_get_time());
+}
+
+void LinkHub::FillStat(StatInputs* in) {
+    for (size_t i = 0; i < kEndReasonCount; i++) in->ends[i] = manager_.ends(static_cast<EndReason>(i));
+    in->manager_stale = manager_.stale_inputs();
+    in->manager_duplicate_ends = manager_.duplicate_ends();
+    in->link_restarts = link_restarts_;
+    in->notice_min_free = d_.notices->min_free();
+    in->audio_queue = d_.audio_queue->Stats();
+    in->ctrl_queue = d_.ctrl_queue->Stats();
+    in->stacks.link_mgr = mgr_stack_min_.load();
+    in->stacks.link_conn = conn_stack_min_.load();
+    std::lock_guard<std::mutex> lock(mutex_);
+    in->audio_link = audio_totals_;
+    in->ctrl_link = ctrl_totals_;
+    StackMarks s = stack_marks_;  // the live links' marks too (atomics the tasks write)
+    if (audio_) {
+        s.audio_rx = MinNonZero(s.audio_rx, audio_->rx_stack_min());
+        s.audio_tx = MinNonZero(s.audio_tx, audio_->tx_stack_min());
+    }
+    if (ctrl_) {
+        s.ctrl_rx = MinNonZero(s.ctrl_rx, ctrl_->rx_stack_min());
+        s.ctrl_tx = MinNonZero(s.ctrl_tx, ctrl_->tx_stack_min());
+    }
+    in->stacks.audio_rx = s.audio_rx;
+    in->stacks.audio_tx = s.audio_tx;
+    in->stacks.ctrl_rx = s.ctrl_rx;
+    in->stacks.ctrl_tx = s.ctrl_tx;
 }
 
 void LinkHub::Restart(uint64_t e, const char* why) {

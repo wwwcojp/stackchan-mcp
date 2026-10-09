@@ -250,3 +250,13 @@ add_executable(stat_report_test test_stat_report.cc ../main/link/stat_report.cc 
 target_include_directories(stat_report_test PRIVATE ../main ../main/audio ../main/gate ../main/net ../main/link ../main/ui)
 target_link_libraries(stat_report_test PRIVATE GTest::gtest_main cjson)
 add_test(NAME stat_report_test COMMAND stat_report_test)
+
+# StackChan FW-A2 plan 2B-2a: the receive side's app ports (plan 2B-1 handoff 2)
+add_executable(app_link_test test_app_link.cc ../main/link/app_link.cc ../main/link/stat_report.cc
+    ../main/link/wire.cc ../main/link/tx_loop.cc ../main/link/link_manager.cc ../main/link/link_manager_core.cc
+    ../main/gate/playback_gate.cc ../main/net/send_queue.cc ../main/net/send_deadline.cc
+    ../main/audio/playback_book.cc ../main/audio/audio_origin.cc ../components/78__esp-ml307/src/ws_frame.cc)
+target_include_directories(app_link_test PRIVATE ../main ../main/audio ../main/gate ../main/net ../main/link ../main/ui
+    ../components/78__esp-ml307/include)
+target_link_libraries(app_link_test PRIVATE GTest::gtest_main playback_gate_core cjson)
+add_test(NAME app_link_test COMMAND app_link_test)
