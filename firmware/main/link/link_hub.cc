@@ -18,7 +18,10 @@ namespace {
 
 constexpr uint32_t kManagerStack = 4096;
 constexpr UBaseType_t kManagerPriority = 6;  // design §1.1
-constexpr uint32_t kWorkerStack = 4096;
+// 4096 overflowed in the handshake on the K151 (2026-10-21): the frames WorkerMain 304 + RunWorker
+// 1712 + Link::Connect 656 + Link::Handshake 672 come to 3344 bytes before the receive wait and a
+// log line. stat shows the high-water mark (stacks.link_conn) to revisit this (design §6.2).
+constexpr uint32_t kWorkerStack = 8192;
 constexpr UBaseType_t kWorkerPriority = 3;
 
 std::string Print(cJSON* root) {
